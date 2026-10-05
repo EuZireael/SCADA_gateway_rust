@@ -149,6 +149,7 @@ pub async fn execute(app: &App, cmd: &CommandMessage) -> Outcome {
             match conn.write(node, variant).await {
                 Ok(status) if status.is_good() => {
                     info!("✍ OPC UA записано {} = {}", tag.name, value);
+                    controller.request_poll();
                     Outcome::applied_converted(value, operator_value)
                 }
                 Ok(status) => {
@@ -175,6 +176,8 @@ pub async fn execute(app: &App, cmd: &CommandMessage) -> Outcome {
             match conn.exec_command(device, field, &value).await {
                 Ok(0) => {
                     info!("✍ PAC записано {device}.{field} = {}", value);
+                    drop(guard); // опрос ждёт это же соединение
+                    controller.request_poll();
                     Outcome::applied_converted(value, operator_value)
                 }
                 Ok(code) => {

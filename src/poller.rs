@@ -147,6 +147,7 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = tick.tick() => {}
+                _ = handle.poll_requested(gw.poll_after_write) => {}
             }
             if !conn.is_alive() {
                 processor.process(&all_bad(&tags));
@@ -256,6 +257,8 @@ async fn run_pac(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancellat
         tokio::select! {
             _ = cancel.cancelled() => { *handle.pac.lock().await = None; return; }
             _ = tick.tick() => {}
+            // Запись прошла — прочитать сразу, а не через полпериода: оператор видит результат нажатия.
+            _ = handle.poll_requested(gw.poll_after_write) => {}
         }
         let _cycle = CycleTimer::start(&app, &handle);
         let mut guard = handle.pac.lock().await;
