@@ -178,6 +178,7 @@ async fn write_opcua(app: &App, controller: &crate::app::ControllerHandle, w: Wr
     match conn.write(node, variant).await {
         Ok(status) if status.is_good() => {
             info!("✍ OPC UA записано {} = {}", tag.name, value);
+            controller.request_poll();
             if let Some(before) = before {
                 // Даём ПЛК применить запись: программа ПЛК обрабатывает её на своём цикле, а не мгновенно.
                 tokio::time::sleep(verify).await;
@@ -244,7 +245,11 @@ async fn write_pac(app: &App, controller: &crate::app::ControllerHandle, w: Writ
                         ),
                     );
                 }
+            } else {
+                drop(guard); // опрос ждёт это же соединение
             }
+            // Опросить сразу, не дожидаясь следующего цикла: монитор видит результат записи без задержки периода.
+            controller.request_poll();
             Outcome::applied_converted(value, operator_value)
         }
         Ok(code) => Outcome::fail("FAILED_WRITE", format!("PAC не выполнил команду {device}.{field} (код {code})")),

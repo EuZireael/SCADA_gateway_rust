@@ -130,6 +130,10 @@ pub struct GatewaySettings {
     pub health_log_interval: Duration,
     /// Как часто слать событие `HEARTBEAT` — признак «шлюз жив» для монитора.
     pub heartbeat_interval: Duration,
+    /// Внеочередной опрос контроллера после удачной записи, через эту задержку (дать ПЛК применить
+    /// команду). Без него записанное значение ждало бы обычного цикла — в среднем полпериода опроса,
+    /// оператор видел результат нажатия через ~1 с вместо десятков мс. `None` — выключено.
+    pub poll_after_write: Option<Duration>,
 }
 
 /// `gateway.publish.*`: значение уходит в Kafka при первом появлении, смене качества, изменении
@@ -267,6 +271,9 @@ impl GatewaySettings {
             reconnect_interval: env_ms(&["GATEWAY_SUPERVISE_INTERVAL_MS", "GATEWAY_SUPERVISEINTERVALMS"], 10_000)?,
             health_log_interval: env_ms(&["GATEWAY_HEALTH_LOG_INTERVAL_MS", "GATEWAY_HEALTHLOGINTERVALMS"], 60_000)?,
             heartbeat_interval: env_ms(&["GATEWAY_HEARTBEAT_INTERVAL_MS", "GATEWAY_HEARTBEATINTERVALMS"], 30_000)?,
+            poll_after_write: env_bool(&["GATEWAY_POLL_AFTER_WRITE_ENABLED"], true)
+                .then(|| env_ms(&["GATEWAY_POLL_AFTER_WRITE_DELAY_MS"], 50))
+                .transpose()?,
         })
     }
 }
