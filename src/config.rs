@@ -35,6 +35,9 @@ pub struct DbSettings {
 pub struct KafkaSettings {
     pub enabled: bool,
     pub bootstrap_servers: String,
+    /// Группа консьюмера команд. Второму шлюзу с другим топиком команд нужна своя: в общей группе
+    /// два экземпляра ребалансили бы друг друга (как spring.kafka.consumer.group-id у Java).
+    pub consumer_group_id: String,
     pub publish_events: bool,
     pub publish_alarms: bool,
     /// Фактор репликации создаваемых шлюзом топиков (на стенде 1, на кластере — по числу брокеров).
@@ -144,6 +147,10 @@ impl Settings {
                 enabled: env_bool(&["KAFKA_ENABLED"], true),
                 bootstrap_servers: env_any(&["SPRING_KAFKA_BOOTSTRAP_SERVERS", "KAFKA_BOOTSTRAP_SERVERS"])
                     .unwrap_or_else(|| "localhost:9092".into()),
+                consumer_group_id: env_or(
+                    &["SPRING_KAFKA_CONSUMER_GROUP_ID", "KAFKA_CONSUMER_GROUP_ID"],
+                    "scada-gateway-group",
+                ),
                 publish_events: env_bool(&["KAFKA_PUBLISH_EVENTS"], true),
                 publish_alarms: env_bool(&["KAFKA_PUBLISH_ALARMS"], true),
                 replication: env_parse(&["KAFKA_TOPICS_REPLICATION"], 1)?,

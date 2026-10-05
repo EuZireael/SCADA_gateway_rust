@@ -274,7 +274,7 @@ async fn consume_while_active<F, Fut>(
 fn assigned_consumer(settings: &KafkaSettings, topic: &str) -> Result<StreamConsumer> {
     let consumer: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", &settings.bootstrap_servers)
-        .set("group.id", "scada-gateway-group")
+        .set("group.id", &settings.consumer_group_id)
         .set("enable.auto.commit", "false")
         .create()?;
     let metadata = consumer.fetch_metadata(Some(topic), Duration::from_secs(10))?;
