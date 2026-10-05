@@ -34,12 +34,8 @@ impl PacConnection {
             .with_context(|| format!("PAC {host}:{port}: нет подключения"))?;
         stream.set_nodelay(true).ok();
         let mut conn = PacConnection { stream, lua: PacLua::new()?, op_timeout, pidx: 0, handshaked: false };
-        // Без этого первые байты приветствия читались бы как заголовок ответа («PAC a»).
-        let mut banner = [0u8; BANNER.len()];
-        conn.read_exact(&mut banner).await?;
-        if banner != BANNER {
-            bail!("PAC: нет приветствия 'PAC accept', пришло {:?}", String::from_utf8_lossy(&banner));
-        }
+        // Приветствие «PAC accept» шлёт ptusa_main, но не plc-simulator: ждать его здесь нельзя
+        // (симулятор молчит до запроса → таймаут). Оно дочитывается в request(), как в Java-шлюзе.
         conn.handshake().await?;
         Ok(conn)
     }
@@ -71,6 +67,11 @@ impl PacConnection {
         self.lua.read(device, field, data_type)
     }
 
+    /// Значение тега из снимка: `tags[channelId]` (симулятор) или `t[device][field]` (ptusa).
+    pub fn read_tag(&self, channel_id: Option<i64>, device: Option<&str>, field: Option<&str>, data_type: &str) -> Option<TagValue> {
+        self.lua.read_tag(channel_id, device, field, data_type)
+    }
+
     /// EXEC_DEVICE_COMMAND: `__<device>:set_cmd('<field>', 1, <value>)`. Возвращает код
     /// результата PAC (LE16): 0 — применено, иначе команда не выполнилась (соединение при
     /// этом живо). Err — сбой связи.
@@ -97,6 +98,15 @@ impl PacConnection {
 
         let mut hdr = [0u8; RESPONSE_HEADER_LEN];
         self.read_exact(&mut hdr).await?;
+        if hdr[..] == BANNER[..RESPONSE_HEADER_LEN] {
+            // Приветствие ptusa пришло перед первым ответом — дочитать и взять настоящий заголовок.
+            let mut rest = [0u8; BANNER.len() - RESPONSE_HEADER_LEN];
+            self.read_exact(&mut rest).await?;
+            if rest[..] != BANNER[RESPONSE_HEADER_LEN..] {
+                bail!("PAC: неожиданное приветствие контроллера");
+            }
+            self.read_exact(&mut hdr).await?;
+        }
         if hdr[0] != NET_ID {
             bail!("PAC: неверный заголовок ответа {:?}", hdr);
         }
@@ -147,7 +157,11 @@ pub mod fake {
     pub const STATES: &str = "t=\n\t{\n\tLINE1V0={M=0, ST=1},\n\t}\n\
         t.OBJECT1 = t.OBJECT1 or {}\nt.OBJECT1=\n\t{\n\tRT_PAR_F=\n\t\t{\n\t\t0, 2.5,\n\t\t},\n\t}\n\0";
 
-    /// Поднять фейковый PAC на свободном порту. banner=false — без приветствия.
+    /// Снимок plc-simulator: плоская таблица по channelId, без `t`.
+    pub const SIM_STATES: &str = "tags={}\ntags['9001']=7\ntags['9002']=1.5\n";
+
+    /// Поднять фейковый PAC на свободном порту. banner=false — как plc-simulator: без приветствия
+    /// и со снимком [`SIM_STATES`].
     pub async fn spawn(banner: bool) -> (u16, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -157,9 +171,8 @@ pub mod fake {
             let Ok((mut s, _)) = listener.accept().await else { return };
             if banner {
                 s.write_all(BANNER).await.ok();
-            } else {
-                s.write_all(&[b's', 12, 1, 0, 0]).await.ok();
             }
+            let states = if banner { STATES } else { SIM_STATES };
             loop {
                 let mut hdr = [0u8; REQUEST_HEADER_LEN];
                 if s.read_exact(&mut hdr).await.is_err() {
@@ -171,7 +184,7 @@ pub mod fake {
                 }
                 let body: Vec<u8> = match payload[0] {
                     CMD_GET_INFO_ON_CONNECT => INFO.as_bytes().to_vec(),
-                    CMD_GET_DEVICES_STATES => [&[0u8, 0][..], STATES.as_bytes()].concat(),
+                    CMD_GET_DEVICES_STATES => [&[0u8, 0][..], states.as_bytes()].concat(),
                     CMD_EXEC_DEVICE_COMMAND => {
                         let lua = String::from_utf8_lossy(&payload[1..]).to_string();
                         let ok = lua.starts_with("__LINE1V0:");
@@ -206,9 +219,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fails_without_banner() {
+    async fn reads_simulator_snapshot_without_banner() {
         let (port, _) = fake::spawn(false).await;
-        assert!(PacConnection::connect("127.0.0.1", port, Duration::from_millis(500)).await.is_err());
+        let mut conn = PacConnection::connect("127.0.0.1", port, Duration::from_millis(500)).await.unwrap();
+        conn.poll_states().await.unwrap();
+        assert_eq!(conn.read_tag(Some(9001), Some("DEV"), Some("ST"), "INT32"), Some(TagValue::Int(7)));
+        assert_eq!(conn.read_tag(Some(9002), None, None, "FLOAT"), Some(TagValue::F64(1.5)));
+        assert_eq!(conn.read_tag(Some(9999), None, None, "FLOAT"), None);
     }
 
     #[tokio::test]

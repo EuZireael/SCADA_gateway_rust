@@ -63,6 +63,19 @@ impl PacLua {
         convert(&field_value(&dev, field)?, data_type)
     }
 
+    /// Значение тега: сначала плоская таблица симулятора `tags['<channelId>']` (так снимок отдаёт
+    /// plc-simulator), затем `t[device][field]` настоящего ptusa — как PacLua.lookup Java-шлюза.
+    pub fn read_tag(&self, channel_id: Option<i64>, device: Option<&str>, field: Option<&str>, data_type: &str) -> Option<TagValue> {
+        if let Some(id) = channel_id
+            && let Ok(tags) = self.lua.globals().get::<Table>("tags")
+            && let Ok(v) = tags.get::<Value>(id.to_string())
+            && !v.is_nil()
+        {
+            return convert(&v, data_type);
+        }
+        self.read(device?, field?, data_type)
+    }
+
     /// Проверка, что стейт не видит опасные библиотеки (для тестов).
     #[cfg(test)]
     fn global_is_nil(&self, name: &str) -> bool {

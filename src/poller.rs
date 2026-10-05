@@ -277,10 +277,12 @@ async fn run_pac(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancellat
                 let readings: Vec<Reading> = tags
                     .iter()
                     .map(|tag| {
-                        let value = match (tag.device_name.as_deref(), tag.field_name.as_deref()) {
-                            (Some(d), Some(f)) => conn.read_value(d, f, &tag.data_type),
-                            _ => None,
-                        };
+                        let value = conn.read_tag(
+                            tag.channel_id,
+                            tag.device_name.as_deref(),
+                            tag.field_name.as_deref(),
+                            &tag.data_type,
+                        );
                         let quality = if value.is_some() { Quality::Good } else { Quality::Bad };
                         Reading { tag: tag.clone(), value, quality, timestamp: ts }
                     })
