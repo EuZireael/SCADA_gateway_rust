@@ -275,6 +275,7 @@ mod tests {
             kind: ControllerKind::Pac,
             enabled: true,
             tags: Vec::new(),
+            opc_security: Default::default(),
         })
     }
 
