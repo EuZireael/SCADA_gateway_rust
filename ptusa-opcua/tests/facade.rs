@@ -94,13 +94,22 @@ fn deflate(data: &[u8]) -> Vec<u8> {
     enc.finish().unwrap()
 }
 
+/// Рантайм поддельной прошивки: у настоящей это отдельный процесс, и её ответы не зависят от рантайма фасада
+/// (иначе тест, намеренно загружающий рантайм фасада, останавливал бы и «прошивку»).
+fn pac_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap())
+}
+
 impl FakePac {
     async fn start(port: u16, state: Arc<Mutex<PacState>>) -> FakePac {
-        let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let std_listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let port = std_listener.local_addr().unwrap().port();
         let clients: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::default();
         let (st, cl) = (state, clients.clone());
-        let task = tokio::spawn(async move {
+        let task = pac_runtime().spawn(async move {
+            let listener = TcpListener::from_std(std_listener).unwrap();
             while let Ok((stream, _)) = listener.accept().await {
                 let st = st.clone();
                 cl.lock().unwrap().push(tokio::spawn(async move {
@@ -174,6 +183,10 @@ struct Stand {
 
 impl Stand {
     async fn start() -> Stand {
+        Stand::start_polling(Duration::from_millis(100)).await
+    }
+
+    async fn start_polling(poll: Duration) -> Stand {
         let dir = std::env::temp_dir().join(format!("ptusa-opcua-it-{}-{}", std::process::id(), free_port()));
         std::fs::create_dir_all(&dir).unwrap();
         let tags: Vec<String> = CHANNELS
@@ -204,7 +217,7 @@ impl Stand {
             pac: client,
             pusher,
             snapshot: Snapshot::new().unwrap(),
-            poll: Duration::from_millis(100),
+            poll,
             stats: stats.clone(),
         };
         let tasks = vec![
@@ -394,4 +407,37 @@ async fn hostile_snapshot_is_contained() {
     })
     .await
     .expect("сценарий не уложился в 60 с");
+}
+
+/// Запись, пока фасад часто снимает снимок и клиент читает узлы, не вешает сервер. Обратный случай: запись шла в
+/// синхронной функции с ожиданием асинхронной команды, а цикл снимков синхронно ждал ту же блокировку адресного
+/// пространства; поток, державший драйвер ввода-вывода, оказывался заблокирован, команда не получала ответа, и сервер
+/// переставал отвечать совсем (у шлюза — таймауты чтения и записи, «handshake завис»).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn writes_during_fast_polling_do_not_freeze_the_server() {
+    let _ = tracing_subscriber::fmt().with_env_filter("ptusa_opcua=info").try_init();
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let s = Stand::start_polling(Duration::from_millis(5)).await;
+        let session = s.session.clone();
+        let names = ["LINE1V0.ST", "LINE1V0.M", "LINE1TE1.V", "LINE1TE1.P_CZ", "OBJECT1.RT_PAR_F[2]", "SYSTEM.UP_TIME"];
+        // Читатель: как шлюз, опрашивает все узлы без пауз.
+        let reader = tokio::spawn(async move {
+            loop {
+                let rv: Vec<ReadValueId> =
+                    names.iter().map(|n| ReadValueId::from(NodeId::new(2, n.to_string()))).collect();
+                if session.read(&rv, TimestampsToReturn::Both, 0.0).await.is_err() {
+                    return;
+                }
+            }
+        });
+        for i in 0..300 {
+            let status = tokio::time::timeout(Duration::from_secs(5), s.write("LINE1V0.ST", Variant::Int32(i % 2)))
+                .await
+                .unwrap_or_else(|_| panic!("запись {i} не вернулась за 5 с: сервер завис"));
+            assert_eq!(status, StatusCode::Good, "запись {i}");
+        }
+        reader.abort();
+    })
+    .await
+    .expect("тест завис");
 }

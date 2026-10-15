@@ -47,6 +47,7 @@ ENABLED_CHANNELS = 1834
 PTUSA = "ptusa-emulator"
 PTUSA_PAC_PORT = 10110
 FACADE_PORT = 4850
+FACADE_POLL_MS = os.environ.get("FACADE_POLL_MS", "500")   # период опроса прошивки фасадом (--facade-poll-ms)
 SIM_PAC_PORT = 10210
 SIM_OPC_PORT = 4860
 CLK = os.sysconf("SC_CLK_TCK")
@@ -250,7 +251,7 @@ class Firmware:
         if mode == "opcua":
             self.facade = Proc([str(FACADE)], {"PAC_HOST": "127.0.0.1", "PAC_PORT": str(PTUSA_PAC_PORT),
                                                "STATION_CONFIG": str(STATIONS["opcua"]), "OPCUA_BIND": f"0.0.0.0:{FACADE_PORT}",
-                                               "POLL_MS": "500", "OPCUA_ENDPOINT": f"opc.tcp://127.0.0.1:{FACADE_PORT}"},
+                                               "POLL_MS": FACADE_POLL_MS, "OPCUA_ENDPOINT": f"opc.tcp://127.0.0.1:{FACADE_PORT}"},
                                self.workdir / "facade.log")
             wait_port(FACADE_PORT)
             time.sleep(3)
@@ -277,7 +278,14 @@ class Simulator:
         self.workdir, self.proc = workdir, None
         self.pac_port, self.opc_port = SIM_PAC_PORT, SIM_OPC_PORT
 
+    def start_plc(self):
+        self.start(self.mode)
+
+    def stop_plc(self):
+        self.stop()
+
     def start(self, mode):
+        self.mode = mode
         cfg = "config/station_pac.yaml" if mode == "easydriver" else "config/station_opcua.yaml"
         self.proc = Proc([str(SIMULATOR), cfg], {"PAC_PORT": str(SIM_PAC_PORT),
                                                  "OPCUA_ENDPOINT": f"opc.tcp://127.0.0.1:{SIM_OPC_PORT}"},
@@ -679,8 +687,12 @@ def main():
     ap.add_argument("--seconds", type=int, default=60)
     ap.add_argument("--warmup", type=int, default=20)
     ap.add_argument("--verify-ms", type=int, default=800)
+    ap.add_argument("--facade-poll-ms", default="500", help="период опроса прошивки OPC UA-фасадом, мс (режим opcua, firmware)")
+    ap.add_argument("--suffix", default="", help="добавить к ключам результата (например, _facade100), чтобы не затирать прежние")
     ap.add_argument("--merge", action="store_true", help="дополнить уже сохранённый результат источника новыми сценариями")
     a = ap.parse_args()
+    global FACADE_POLL_MS
+    FACADE_POLL_MS = a.facade_poll_ms
 
     for b in (GATEWAY, SIMULATOR, FACADE):
         if not b.exists():
@@ -695,6 +707,7 @@ def main():
     previous = outdir / f"{a.source}.json"
     if a.merge and previous.exists():
         out = {**json.loads(previous.read_text(encoding="utf-8")), "modes": modes}
+    previous_values = {k: out[k] for k in scenarios if k in out}  # для --suffix: что было до этого прогона
     log("Kafka")
     Kafka_.start()
     try:
@@ -710,6 +723,15 @@ def main():
             sc_writes(modes, src_factory, workdir, out, a.verify_ms, poll_ms=100, samples=12, result_key="writes_fast")
         if "recovery" in scenarios:
             sc_recovery(modes, src_factory, workdir, out)
+        if a.suffix:
+            # Новые результаты уходят под ключ с суффиксом, а прежние (из --merge) остаются на своих местах.
+            for key in scenarios:
+                if key in out:
+                    out[key + a.suffix] = out[key]
+                    if key in previous_values:
+                        out[key] = previous_values[key]
+                    else:
+                        del out[key]
     finally:
         Kafka_.stop()
         if a.source == "firmware":

@@ -1,8 +1,7 @@
 //! OPC UA-сервер фасада и цикл опроса прошивки.
 //!
-//! Узлы получают значения из снимка раз в период опроса; запись клиента идёт командой прошивке
-//! прямо из обработчика записи (он синхронный, поэтому ждёт ответа прошивки через
-//! `block_in_place` — нужен многопоточный рантайм tokio).
+//! Узлы получают значения из снимка раз в период опроса; запись клиента идёт командой прошивке из обработчика записи
+//! (синхронного) — по отдельному соединению и в отдельном рантайме, см. `add_write_callbacks` (нужен многопоточный рантайм tokio).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -69,8 +68,14 @@ impl Pusher {
                 (self.node(ch), dv)
             })
             .collect();
-        let _ =
-            self.manager.set_values(self.handle.subscriptions(), batch.iter().map(|(id, dv)| (id, None, dv.clone())));
+        // set_values синхронно берёт блокировку адресного пространства, которую на время записи клиента держит и обработчик
+        // записи (он ждёт ответа прошивки). Ждать её на рабочем потоке, пока он держит драйвер ввода-вывода, нельзя:
+        // ответ прошивки некому принять, и сервер замирает. block_in_place отдаёт драйвер другому потоку.
+        tokio::task::block_in_place(|| {
+            let _ = self
+                .manager
+                .set_values(self.handle.subscriptions(), batch.iter().map(|(id, dv)| (id, None, dv.clone())));
+        });
     }
 
     /// У всех каналов один и тот же плохой статус.
@@ -141,8 +146,9 @@ fn scalar(v: &Variant) -> Option<String> {
     })
 }
 
-/// Запись клиента → команда прошивке; её исход — статус записи.
-async fn command(ch: &Channel, value: &Variant, pac: &PacClient, stats: &Stats) -> StatusCode {
+/// Запись клиента → команда прошивке; её исход — статус записи. Идёт по своему соединению `cmd_pac` (оно открывается
+/// при первой команде и после обрыва); `pac` — общий опрос, по нему видно, жива ли связь с прошивкой.
+async fn command(ch: &Channel, value: &Variant, pac: &PacClient, cmd_pac: &PacClient, stats: &Stats) -> StatusCode {
     stats.commands.fetch_add(1, Ordering::Relaxed);
     // Строковый канал прошивке командой не пишется (set_cmd принимает только числа).
     let Some(scalar) = scalar(value).filter(|_| ch.kind != Kind::String) else {
@@ -153,22 +159,34 @@ async fn command(ch: &Channel, value: &Variant, pac: &PacClient, stats: &Stats) 
         return StatusCode::BadCommunicationError;
     }
     let text = command_text(ch, &scalar);
-    match pac.command(&text).await {
-        Ok(0) => {
-            info!("✍ {text}");
-            StatusCode::Good
-        }
-        Ok(code) => {
-            stats.rejected.fetch_add(1, Ordering::Relaxed);
-            warn!("команда {text}: прошивка вернула код {code}");
-            StatusCode::BadInvalidState
-        }
-        Err(e) => {
+    // Соединение команд могло оборваться, пока им не пользовались (прошивку перезапускали, простой): первая же неудача —
+    // повод открыть новое и повторить команду один раз. set_cmd значения идемпотентна.
+    for attempt in 0..2 {
+        if !cmd_pac.connected()
+            && let Err(e) = cmd_pac.connect().await
+        {
             warn!("команда {text}: нет связи с прошивкой: {e:#}");
-            pac.close().await;
-            StatusCode::BadCommunicationError
+            return StatusCode::BadCommunicationError;
+        }
+        match cmd_pac.command(&text).await {
+            Ok(0) => {
+                info!("✍ {text}");
+                return StatusCode::Good;
+            }
+            Ok(code) => {
+                stats.rejected.fetch_add(1, Ordering::Relaxed);
+                warn!("команда {text}: прошивка вернула код {code}");
+                return StatusCode::BadInvalidState;
+            }
+            Err(e) => {
+                cmd_pac.close().await;
+                if attempt == 1 {
+                    warn!("команда {text}: нет связи с прошивкой: {e:#}");
+                }
+            }
         }
     }
+    StatusCode::BadCommunicationError
 }
 
 /// Хост и порт из `host:port`.
@@ -213,6 +231,12 @@ fn populate(manager: &SimpleNodeManager, ns: u16, channels: &[Channel]) -> usize
 
 /// Запись клиента: сначала команда прошивке, статус записи — её исход. Значение узла не трогаем:
 /// оно придёт из следующего снимка.
+///
+/// Обработчик записи синхронный и вызывается под блокировкой адресного пространства. Ждать в нём ответа прошивки через
+/// драйвер ввода-вывода основного рантайма нельзя: тот же драйвер держит рабочий поток, которого параллельный запрос
+/// чтения останавливает на этой самой блокировке, — ответ некому принять, и сервер замирает (у шлюза — таймауты и
+/// «handshake завис»). Поэтому команды идут по отдельному соединению и в отдельном рантайме со своим драйвером, а
+/// обработчик ждёт исхода обычным каналом.
 fn add_write_callbacks(
     manager: &SimpleNodeManager,
     ns: u16,
@@ -220,12 +244,27 @@ fn add_write_callbacks(
     pac: &Arc<PacClient>,
     stats: &Arc<Stats>,
 ) {
-    let rt = tokio::runtime::Handle::current();
+    // Рантайм команд живёт до конца процесса (его нельзя уронить из асинхронного контекста).
+    let rt: &'static tokio::runtime::Runtime = Box::leak(Box::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("pac-commands")
+            .enable_all()
+            .build()
+            .expect("рантайм команд"),
+    ));
+    let cmd_pac = Arc::new(pac.sibling());
     for ch in channels.iter().filter(|c| c.writable) {
-        let (ch_cb, pac, stats, rt) = (ch.clone(), pac.clone(), stats.clone(), rt.clone());
+        let (ch_cb, pac, cmd_pac, stats) = (ch.clone(), pac.clone(), cmd_pac.clone(), stats.clone());
         manager.inner().add_write_callback(NodeId::new(ns, ch.node_name.clone()), move |dv: DataValue, _range| {
             let Some(value) = dv.value else { return StatusCode::BadTypeMismatch };
-            tokio::task::block_in_place(|| rt.block_on(command(&ch_cb, &value, &pac, &stats)))
+            let (ch, pac, cmd_pac, stats) = (ch_cb.clone(), pac.clone(), cmd_pac.clone(), stats.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            rt.spawn(async move {
+                let _ = tx.send(command(&ch, &value, &pac, &cmd_pac, &stats).await);
+            });
+            // block_in_place: рабочий поток отдаёт ядро другому, пока ждёт.
+            tokio::task::block_in_place(|| rx.recv()).unwrap_or(StatusCode::BadInternalError)
         });
     }
 }
