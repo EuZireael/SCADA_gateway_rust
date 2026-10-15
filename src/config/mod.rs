@@ -444,13 +444,66 @@ mod tests {
     #[test]
     fn repository_configs_pass_station_validation() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        for (file, tags) in [("config/controllers.yaml", 2517usize), ("config/stations/BN1_MCA1.yaml", 1834)] {
+        for (file, tags) in [
+            ("config/controllers.yaml", 2517usize),
+            ("config/stations/BN1_MCA1.yaml", 1834),
+            ("config/stations/BN1_MCA1_easydriver.yaml", 1834),
+        ] {
             let raw = std::fs::read_to_string(root.join(file)).unwrap();
             let yaml = expand_placeholders(&raw, |_| Some("host".to_string())).unwrap();
             let servers = parse_controllers(&yaml).unwrap_or_else(|e| panic!("{file}: {e:#}"));
             let enabled: usize =
                 servers.iter().filter(|s| s.enabled).flat_map(|s| &s.tags).filter(|t| t.enabled).count();
             assert_eq!(enabled, tags, "{file}");
+        }
+    }
+
+    /// Станция «EasyDriver» (PAC) — та же станция, что для OPC UA: те же каналы, имена, типы, доступ на запись и
+    /// выключенные каналы; различаются только протокол и адрес. Иначе сравнение двух режимов было бы нечестным.
+    #[test]
+    fn easydriver_station_has_the_same_channels_as_the_opcua_one() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let load = |file: &str| {
+            let raw = std::fs::read_to_string(root.join(file)).unwrap();
+            let yaml = expand_placeholders(&raw, |_| Some("host".to_string())).unwrap();
+            let mut servers = parse_controllers(&yaml).unwrap();
+            assert_eq!(servers.len(), 1, "{file}: один контроллер");
+            servers.remove(0)
+        };
+        let (opc, pac) = (load("config/stations/BN1_MCA1.yaml"), load("config/stations/BN1_MCA1_easydriver.yaml"));
+        assert!(opc.endpoint.starts_with("opc.tcp://") && pac.endpoint.starts_with("pac://"));
+        assert_eq!((opc.name.as_str(), opc.enabled), (pac.name.as_str(), pac.enabled));
+        assert_eq!(opc.tags.len(), pac.tags.len());
+        // Поле PAC — адрес в ПЛК: пробелы в индексе (`ST_CH[ 1 ]`) убраны, в имени канала они остаются.
+        let no_spaces = |f: &Option<String>| f.as_deref().map(|f| f.replace(' ', ""));
+        for (a, b) in opc.tags.iter().zip(&pac.tags) {
+            assert_eq!(
+                (
+                    &a.name,
+                    &a.device_name,
+                    no_spaces(&a.field_name),
+                    &a.device_type,
+                    &a.data_type,
+                    a.enabled,
+                    a.writable,
+                    a.polling_rate
+                ),
+                (
+                    &b.name,
+                    &b.device_name,
+                    no_spaces(&b.field_name),
+                    &b.device_type,
+                    &b.data_type,
+                    b.enabled,
+                    b.writable,
+                    b.polling_rate
+                ),
+                "{}",
+                a.name
+            );
+            assert_eq!(b.field_name.as_deref(), no_spaces(&b.field_name).as_deref(), "{}: пробел в поле PAC", b.name);
+            assert_eq!(a.protocol.as_deref(), Some("opcua"));
+            assert_eq!(b.protocol.as_deref(), Some("pac"));
         }
     }
 

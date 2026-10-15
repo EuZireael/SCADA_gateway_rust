@@ -124,6 +124,30 @@ pub struct KafkaOut {
     delivery: Arc<DeliveryState>,
     /// Только для юнит-тестов (`cfg!(test)`): вместо отправки сообщения (топик, ключ, тело) копятся здесь.
     pub captured: std::sync::Mutex<Vec<(String, String, String)>>,
+    /// Только для юнит-тестов: сколько следующих сообщений «очередь продюсера не приняла» (имитация переполнения).
+    pub reject_next: std::sync::atomic::AtomicUsize,
+    /// Предупреждение о переполнении очереди — не чаще раза в [`WARN_EVERY`].
+    queue_full_warn: WarnThrottle,
+}
+
+/// Ограничитель частоты предупреждений: пропускает одно в [`WARN_EVERY`], остальные считает.
+#[derive(Default)]
+struct WarnThrottle {
+    last_ms: AtomicI64,
+    suppressed: AtomicU64,
+}
+
+impl WarnThrottle {
+    /// `Some(число подавленных с прошлого раза)`, если пора писать в журнал.
+    fn record(&self, now_ms: i64) -> Option<u64> {
+        let last = self.last_ms.load(Ordering::Relaxed);
+        if last == 0 || now_ms - last >= WARN_EVERY.as_millis() as i64 {
+            self.last_ms.store(now_ms, Ordering::Relaxed);
+            return Some(self.suppressed.swap(0, Ordering::Relaxed));
+        }
+        self.suppressed.fetch_add(1, Ordering::Relaxed);
+        None
+    }
 }
 
 impl KafkaOut {
@@ -151,6 +175,8 @@ impl KafkaOut {
             leadership,
             delivery,
             captured: std::sync::Mutex::new(Vec::new()),
+            reject_next: std::sync::atomic::AtomicUsize::new(0),
+            queue_full_warn: WarnThrottle::default(),
         })
     }
 
@@ -166,26 +192,49 @@ impl KafkaOut {
         self.send_raw(topic, key, &payload);
     }
 
-    /// Отправить готовое тело (JSON).
-    fn send_raw(&self, topic: &str, key: &str, payload: &[u8]) {
+    /// Отправить готовое тело (JSON). `false` — очередь продюсера переполнена и сообщение не принято: это не сбой
+    /// доставки (брокер жив, просто не успевает), поэтому повторную отправку всех тегов он не запускает; вызывающий
+    /// сам повторит сообщение в следующем цикле. Прочие ошибки постановки считаются сбоем доставки.
+    fn send_raw(&self, topic: &str, key: &str, payload: &[u8]) -> bool {
         if cfg!(test) {
+            // Тестовый хук (один поток): отказать следующему сообщению, пока счётчик не обнулится.
+            if self.reject_next.load(Ordering::Acquire) > 0 {
+                self.reject_next.fetch_sub(1, Ordering::AcqRel);
+                self.metrics.kafka_queue_full.inc();
+                return false;
+            }
             self.captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((
                 topic.into(),
                 key.into(),
                 String::from_utf8_lossy(payload).into(),
             ));
-            return;
+            return true;
         }
-        if let Err((e, _)) = self.producer.send(BaseRecord::to(topic).key(key).payload(payload)) {
-            self.metrics.kafka_send_errors.inc();
-            if let Some(suppressed) = self.delivery.record_failure(chrono::Utc::now().timestamp_millis()) {
-                warn!("Kafka: {topic} не принял сообщение {key}: {e} (ещё {suppressed} с прошлого предупреждения)");
+        match self.producer.send(BaseRecord::to(topic).key(key).payload(payload)) {
+            Ok(()) => true,
+            Err((rdkafka::error::KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull), _)) => {
+                self.metrics.kafka_queue_full.inc();
+                if let Some(suppressed) = self.queue_full_warn.record(chrono::Utc::now().timestamp_millis()) {
+                    warn!(
+                        "Kafka: очередь продюсера переполнена — брокер не успевает; теги уйдут следующим циклом \
+                         (ещё {suppressed} с прошлого предупреждения)"
+                    );
+                }
+                false
+            }
+            Err((e, _)) => {
+                self.metrics.kafka_send_errors.inc();
+                if let Some(suppressed) = self.delivery.record_failure(chrono::Utc::now().timestamp_millis()) {
+                    warn!("Kafka: {topic} не принял сообщение {key}: {e} (ещё {suppressed} с прошлого предупреждения)");
+                }
+                true
             }
         }
     }
 
     /// Телеметрия тега в топик телеметрии (ключ — имя тега). Только ставит в очередь librdkafka, сеть не ждёт.
-    pub fn send_telemetry(&self, tag_name: &str, message: &TelemetryMessage) {
+    /// `false` — очередь переполнена, сообщение не принято: тег надо отправить заново (это не сбой доставки и повторную отправку всех тегов не запускает).
+    pub fn send_telemetry(&self, tag_name: &str, message: &TelemetryMessage) -> bool {
         thread_local! {
             /// Буфер тела телеметрии переиспользуется: сообщение копируется в очередь librdkafka при отправке.
             static BODY: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::with_capacity(128));
@@ -194,8 +243,8 @@ impl KafkaOut {
             let mut body = cell.borrow_mut();
             body.clear();
             message.write_json(&mut body);
-            self.send_raw(&self.topics.telemetry, tag_name, &body);
-        });
+            self.send_raw(&self.topics.telemetry, tag_name, &body)
+        })
     }
 
     /// Событие в топик событий (ключ — тип): только активный экземпляр и только если публикация включена.
@@ -307,7 +356,13 @@ pub async fn consume_commands<F, Fut>(
                 changed = role.changed() => if changed.is_err() { return },
             }
         }
-        match assigned_consumer(&settings, &topic) {
+        // Создание консьюмера синхронно (метаданные и позиции — до 10 с каждое, пока брокер недоступен): на потоке
+        // рантайма оно держало бы рабочий поток и останавливало соседние задачи, в том числе чтение ПЛК (ложная «потеря связи»).
+        let (cfg, topic_name) = (settings.clone(), topic.clone());
+        let created = tokio::task::spawn_blocking(move || assigned_consumer(&cfg, &topic_name))
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("задача создания консьюмера: {e}")));
+        match created {
             Ok(consumer) => {
                 info!("▶ Приём команд включён: {topic}");
                 consume_while_active(&consumer, &leadership, &mut role, &cancel, &handler).await;

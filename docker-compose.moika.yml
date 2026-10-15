@@ -1,7 +1,13 @@
 # ============================================================================
 # Стенд на ЭМУЛЯТОРЕ МОЙКИ: данные отдаёт настоящая прошивка ptusa с проектом станции
-# BN1-МСА1 (папка Moika — проприетарная, в репозиторий не входит), шлюз ходит к ней только
-# по OPC UA через OPC UA-фасад (ptusa-opcua/). Python-симулятора здесь нет.
+# BN1-МСА1 (папка Moika — проприетарная, в репозиторий не входит). Python-симулятора здесь нет.
+#
+# ДВА режима чтения той же станции (одни и те же 2647 каналов, имена и типы):
+#   opcua        шлюз ходит к прошивке ТОЛЬКО по OPC UA через OPC UA-фасад (ptusa-opcua/); по умолчанию
+#   easydriver   шлюз ходит к прошивке напрямую по PAC (driver-master) — по протоколу драйвера старой SCADA
+#                (EasyDriver); фасад не запускается
+#   ./up-moika.sh opcua | easydriver [plc]     # или переменные: GATEWAY_STATION=BN1_MCA1_easydriver.yaml и
+#                                              # COMPOSE_PROFILES=opcua (фасад) для docker compose напрямую
 #
 # Два режима (папка проекта ПЛК — переменная MOIKA_PROJECT, обязательна):
 #
@@ -95,9 +101,11 @@ services:
       retries: 12
     restart: unless-stopped
 
+  # OPC UA-фасад: только в режиме opcua (профиль). В режиме easydriver шлюз говорит с прошивкой напрямую по PAC.
   ptusa-opcua:
     build: ./ptusa-opcua
     container_name: scada-moika-opcua
+    profiles: ["opcua"]
     environment:
       PAC_HOST: ptusa
       PAC_PORT: "10000"
@@ -126,12 +134,14 @@ services:
       SPRING_DATASOURCE_PASSWORD: "scada_password"
       SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       CONTROLLERS_YAML: "/app/config/station.yaml"
-      PLC_HOST: "ptusa-opcua"
+      PLC_HOST: "ptusa-opcua"   # режим opcua: через OPC UA-фасад
+      PAC_HOST: "ptusa"         # режим easydriver: напрямую к прошивке по PAC
+      PAC_PORT: "10000"
       # Кадры BAD при обрыве связи (value=null, quality=BAD): монитор их ждёт — иначе тег на обрыве
       # замирает на последнем значении и выглядит живым.
       GATEWAY_SEND_BAD_FRAMES: "true"
     volumes:
-      - ./config/stations/BN1_MCA1.yaml:/app/config/station.yaml:ro
+      - ./config/stations/${GATEWAY_STATION:-BN1_MCA1.yaml}:/app/config/station.yaml:ro
       # Пользовательские Lua-скрипты обработки значений: правки подхватываются без перезапуска.
       - ./config/scripts:/app/scripts:ro
     ports:
@@ -141,8 +151,11 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      ptusa:
+        condition: service_healthy
       ptusa-opcua:
         condition: service_healthy
+        required: false   # в режиме easydriver фасада нет
     healthcheck:
       test: ["CMD", "/app/scada-gateway", "healthcheck"]
       interval: 10s

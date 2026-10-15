@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Дымовой тест стенда целиком: docker-compose.yml (Kafka + Postgres + Rust-симулятор + Rust-шлюз,
+# Дымовой тест стенда целиком: docker-compose.yml (Kafka + Postgres + OPC UA-симулятор станции + Rust-шлюз,
 # образы собираются из исходников) и сбои, которые бывают на объекте:
 #
-#   1. стенд поднимается, все три контроллера на связи, в Kafka — телеметрия всех тегов в формате
+#   1. стенд поднимается, контроллер станции (все каналы базы каналов — OPC UA) на связи, в Kafka — телеметрия всех тегов в формате
 #      монитора ({value, quality, timestamp});
 #   2. команда записи через Kafka → статус APPLIED в scada-command-results;
 #   3. брокер Kafka пропал на 45 с: шлюз жив и опрашивает, после возвращения брокера все теги
 #      отправляются заново (scada_kafka_resyncs_total растёт), а не ждут полной отправки;
 #   4. БД пропала на 30 с: телеметрия идёт, опрос не отстаёт (scada_poll_overruns_total не растёт),
 #      /actuator/health показывает db DOWN, потом UP;
-#   5. симулятор (ПЛК) пропал: все контроллеры DOWN, в Kafka кадры BAD; вернулся — снова UP.
+#   5. симулятор (ПЛК) пропал: контроллер DOWN, в Kafka кадры BAD; вернулся — снова UP.
 #
 #   scripts/stack_smoke.sh            # нужны docker compose, curl, python3; порты 5433, 9094, 8888, 4840
+#   MODE=easydriver scripts/stack_smoke.sh   # та же станция и те же проверки, но шлюз читает её по PAC (EasyDriver), порт 10000
 #   KEEP=1 scripts/stack_smoke.sh     # не гасить стенд после теста
 #   GATEWAY_BIN=target/release/scada-gateway scripts/stack_smoke.sh   # шлюз — процессом на хосте (без сборки его образа)
 #   NO_BUILD=1 — вместе с GATEWAY_BIN: образ симулятора не пересобирать (тег $PROJECT-simulator должен существовать)
@@ -20,12 +21,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+MODE=${MODE:-opcua}   # opcua | easydriver: как шлюз читает ту же станцию
+case "$MODE" in
+  opcua)      export SIM_CONFIG=config/station_opcua.yaml GATEWAY_STATION=BN1_MCA1.yaml ;;
+  easydriver) export SIM_CONFIG=config/station_pac.yaml   GATEWAY_STATION=BN1_MCA1_easydriver.yaml ;;
+  *) echo "MODE: opcua или easydriver" >&2; exit 2 ;;
+esac
 PROJECT=${COMPOSE_PROJECT_NAME:-scada-smoke}
 DC=(docker compose -p "$PROJECT" -f docker-compose.yml ${COMPOSE_OVERRIDE:+-f "$COMPOSE_OVERRIDE"})
 GW=http://localhost:8888
 TAGS_TOPIC=scada.tags
-TAG_RW='Барановичи-1.BN1_MCA1.M_M.M3.M'
-EXPECTED_TAGS=2517
+TAG_RW='Барановичи-1.BN1_MCA1.LINE1.MAIN_CIP_MODULE.PAR_MAIN[7]'
+EXPECTED_TAGS=1834   # включённые каналы config/stations/BN1_MCA1.yaml
 
 log()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 ok()   { printf '   ✓ %s\n' "$*"; }
@@ -72,13 +79,13 @@ kafka_consume() { # <топик> <макс. сообщений> <таймаут 
     --topic "$1" --max-messages "$2" --timeout-ms "$3" --property print.key=true "${@:4}" 2>/dev/null
 }
 
-log "1. Стенд: сборка образов и запуск"
+log "1. Стенд ($MODE): сборка образов и запуск"
 if [ -n "${GATEWAY_BIN:-}" ]; then
   # Шлюз — процесс на хосте (например, когда образ шлюза собрать негде); остальное — в Docker.
   "${DC[@]}" up -d ${NO_BUILD:+--no-build} kafka postgres simulator
   until_ok 120 "Kafka и Postgres готовы" bash -c "[ \"\$(docker inspect -f '{{.State.Health.Status}}' scada-rs-kafka)\" = healthy ] && [ \"\$(docker inspect -f '{{.State.Health.Status}}' scada-rs-postgres)\" = healthy ]"
   GW_LOG=$(mktemp)
-  CONTROLLERS_YAML=config/controllers.yaml SIM_HOST=127.0.0.1 SERVER_PORT=8888 \
+  CONTROLLERS_YAML=config/stations/$GATEWAY_STATION PLC_HOST=127.0.0.1 PAC_HOST=127.0.0.1 PAC_PORT=${SIM_PAC_PORT:-10000} SERVER_PORT=8888 \
     SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9094 \
     SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5433/scada_db \
     "$GATEWAY_BIN" >"$GW_LOG" 2>&1 &
@@ -86,8 +93,8 @@ if [ -n "${GATEWAY_BIN:-}" ]; then
 else
   "${DC[@]}" up -d --build
 fi
-until_ok 180 "все контроллеры на связи" controllers_up 3
-ok "шлюз здоров, 3 контроллера UP"
+until_ok 180 "все контроллеры на связи" controllers_up 1
+ok "шлюз здоров, контроллер станции UP"
 kafka_up && ok "Kafka: UP" || fail "компонент kafka не UP"
 db_up && ok "БД: UP"
 
@@ -138,11 +145,13 @@ ok "команда → APPLIED"
 
 log "3. Сбой: брокер Kafka пропал на 45 с"
 sent_before=$(metric scada_telemetry_sent_total); resyncs_before=$(metric scada_kafka_resyncs_total)
+overruns_before=$(metric scada_poll_overruns_total)
 "${DC[@]}" stop kafka >/dev/null
 sleep 45
 health >/dev/null || fail "шлюз не отвечает при недоступном Kafka"
 [ "$(kafka_status)" = DOWN ] && ok "health: kafka DOWN, шлюз жив" || fail "kafka не DOWN при остановленном брокере"
-[ "$(metric scada_poll_overruns_total)" = 0 ] && ok "опрос не отстаёт" || fail "опрос отстал при недоступном Kafka"
+# Сравниваем с моментом до сбоя: пропуск цикла при запуске стенда (медленная машина) к Kafka не относится.
+[ "$(metric scada_poll_overruns_total)" = "$overruns_before" ] && ok "опрос не отстаёт" || fail "опрос отстал при недоступном Kafka"
 "${DC[@]}" start kafka >/dev/null
 resyncs_grew() { [ "$(metric scada_kafka_resyncs_total)" -gt "$resyncs_before" ]; }
 until_ok 120 "повторная отправка после возвращения брокера (scada_kafka_resyncs_total)" resyncs_grew
@@ -154,7 +163,7 @@ overruns=$(metric scada_poll_overruns_total); sent_before=$(metric scada_telemet
 "${DC[@]}" stop postgres >/dev/null
 sleep 30
 [ "$(db_status)" = DOWN ] && ok "health: db DOWN" || fail "db не DOWN при остановленной БД"
-controllers_up 3 && ok "контроллеры на связи, опрос идёт" || fail "опрос остановился без БД"
+controllers_up 1 && ok "контроллер на связи, опрос идёт" || fail "опрос остановился без БД"
 [ "$(metric scada_poll_overruns_total)" = "$overruns" ] && ok "опрос не отстаёт" || fail "опрос отстал без БД"
 "${DC[@]}" start postgres >/dev/null
 until_ok 90 "БД: UP" db_up
@@ -162,10 +171,10 @@ ok "БД вернулась, шлюз подключился без переза
 
 log "5. Сбой: ПЛК (симулятор) пропал"
 "${DC[@]}" stop simulator >/dev/null
-until_ok 90 "все контроллеры DOWN" all_controllers_down
-ok "контроллеры DOWN, шлюз жив"
+until_ok 90 "контроллер DOWN" all_controllers_down
+ok "контроллер DOWN, шлюз жив"
 "${DC[@]}" start simulator >/dev/null
-until_ok 120 "контроллеры снова на связи" controllers_up 3
+until_ok 120 "контроллер снова на связи" controllers_up 1
 ok "связь восстановлена без перезапуска шлюза"
 
 log "Стенд прошёл дымовой тест"

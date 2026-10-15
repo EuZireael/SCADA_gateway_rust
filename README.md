@@ -54,21 +54,25 @@ flowchart LR
 
 ```bash
 docker compose up -d --build         # первый раз соберёт образы
+# или явно выбрать, как шлюз читает станцию (одна и та же станция, 2647 каналов):
+#   scripts/stand.sh opcua        # все каналы по OPC UA
+#   scripts/stand.sh easydriver   # все каналы по PAC — протоколу драйвера старой SCADA (EasyDriver)
 curl localhost:8888/actuator/health  # {"status":"UP","components":{"db":…,"kafka":…,"controllers":{…}}}
 docker compose logs -f gateway       # журнал шлюза
 docker compose down                  # остановить (данные БД сохранятся; -v — стереть)
 ```
 
-Что получилось: три контроллера симулятора (OPC UA, Modbus, PAC) на связи, 2517 тегов, телеметрия в топике `scada.tags`.
-Порты на хост: шлюз `8888`, Kafka `9094`, PostgreSQL `5433` (последние два — только с этого хоста), симулятор
-`4840` (OPC UA) / `5020` (Modbus) / `10000` (PAC).
+Что получилось: симулятор отдаёт **все 2647 каналов базы каналов станции BN1_MCA1 только по OPC UA**, шлюз читает
+1834 включённых канала через `config/stations/BN1_MCA1.yaml`, телеметрия идёт в топик `scada.tags`. Modbus и PAC
+симулятор умеет, но здесь их порты закрыты (три протокола — `simulator/config/replay_config.yaml`, для тестов).
+Порты на хост: шлюз `8888`, Kafka `9094`, PostgreSQL `5433` (последние два — только с этого хоста), симулятор `4840`.
 
 Посмотреть, что уходит в Kafka:
 
 ```bash
 docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
   --topic scada.tags --property print.key=true --max-messages 5
-# Барановичи-1.BN1_MCA1.M_M.M3.M   {"value":1,"quality":"GOOD","timestamp":1760000000.123456789}
+# Барановичи-1.BN1_MCA1.LINE1.MAIN_CIP_MODULE.PAR_MAIN[7]   {"value":0.1,"quality":"GOOD","timestamp":1760000000.123456789}
 ```
 
 ### Готовый образ
@@ -88,7 +92,7 @@ docker run -d --name scada-gateway -p 8888:8888 \
 ```bash
 docker compose up -d postgres kafka simulator
 cargo build --release
-SIM_HOST=127.0.0.1 \
+CONTROLLERS_YAML=config/stations/BN1_MCA1.yaml PLC_HOST=127.0.0.1 \
 SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5433/scada_db \
 SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9094 \
 ./target/release/scada-gateway
@@ -141,7 +145,7 @@ flowchart LR
 | `GATEWAY_API_TOKEN` | — | токен `/api/*`; без него REST открыт |
 | `GATEWAY_PUBLISH_FULL_RESEND_MS` | `30000` | полная отправка неизменившихся значений |
 | `GATEWAY_HA_ENABLED` | `false` | горячее резервирование |
-| `GATEWAY_COMMANDS_VERIFY_MS` | `0` | проверка эффекта записи OPC UA |
+| `GATEWAY_COMMANDS_VERIFY_MS` | `0` | проверка эффекта записи (OPC UA и PAC) |
 | `GATEWAY_PERSIST_TELEMETRY` | `false` | история значений в БД |
 | `SERVER_PORT` | `8888` | HTTP |
 
@@ -243,7 +247,7 @@ src/
 migrations/               схема БД (совместима со схемой Java-шлюза)
 config/                   controllers.yaml, скрипты, конфигурация станции мойки
 tests/                    интеграционные тесты (common/ — запуск шлюза, TCP-прокси)
-simulator/                PLC-симулятор: OPC UA + Modbus + PAC, реплей архива станции (отдельный пакет)
+simulator/                PLC-симулятор: по умолчанию все каналы станции по OPC UA (умеет и Modbus, PAC), реплей архива (отдельный пакет)
 ptusa-opcua/              фасад «driver-master → OPC UA» для настоящей прошивки ptusa (отдельный пакет)
 loadtest/                 нагрузочный стенд (источник OPC UA-серверов)
 scripts/                  стенд, сбои, нагрузка, эмулятор прошивки, PostgreSQL с TLS
@@ -254,8 +258,9 @@ docker-compose.yml        стенд целиком;  docker-compose.moika.yml �
 
 ### Симулятор и станция мойки
 
-* `simulator/` — PLC-симулятор на Rust: OPC UA, Modbus TCP и PAC (в формате ptusa) в одном процессе, проигрывает
-  5-суточный архив станции BN1_MCA1. Повторяет условную логику настоящей прошивки (поля, которые программа ПЛК не
+* `simulator/` — PLC-симулятор на Rust: проигрывает 5-суточный архив станции BN1_MCA1. По умолчанию
+  (`config/station_opcua.yaml`) отдаёт **все 2647 каналов базы каналов станции только по OPC UA**; Modbus TCP и PAC
+  (в формате ptusa) он тоже умеет и поднимает, если в конфигурации есть их теги (`config/replay_config.yaml`, для тестов). Повторяет условную логику настоящей прошивки (поля, которые программа ПЛК не
   отдаёт оператору, клапаны только в ручном режиме): `docs/FIRMWARE_WRITE_BEHAVIOR.md`. Подкоманды: `conformance`
   (проверяет, что любой PAC ведёт себя при записи как описано) и `probe-pac host порт` (печатает снимок любого PAC).
 * `config/stations/BN1_MCA1.yaml` — 1834 канала станции мойки на одном OPC UA-контроллере; данные даёт эмулятор
@@ -269,6 +274,8 @@ docker-compose.yml        стенд целиком;  docker-compose.moika.yml �
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | все переменные окружения, `controllers.yaml`, `scripts.yaml`, проверки при запуске |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | запуск, здоровье, метрики, поведение при сбоях, чек-лист безопасности |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | симптом → причина → что делать |
+| [`docs/PROTOCOL_COMPARISON.md`](docs/PROTOCOL_COMPARISON.md) | **EasyDriver (PAC) или OPC UA**: один и тот же стенд в двух режимах, замеры на настоящей прошивке, безопасность, выводы «что лучше и с чем работать» |
+| [`docs/STRESS_TEST.md`](docs/STRESS_TEST.md) | стресс-тест: до миллиона значений тегов в секунду на одном экземпляре, методика, результаты, ограничения |
 | [`docs/PILOT_CHECKLIST.md`](docs/PILOT_CHECKLIST.md) | пробный запуск на реальном оборудовании: ступени от «только чтение» до монитора, критерии, когда остановиться |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | сборка, тесты, CI, соглашения, как расширять, релиз |
 | [`docs/MONITOR_INTEGRATION.md`](docs/MONITOR_INTEGRATION.md) | подключение монитора, что нового для него |

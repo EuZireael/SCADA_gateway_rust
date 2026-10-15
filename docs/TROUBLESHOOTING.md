@@ -76,7 +76,7 @@
 
 | Статус | Значение | Что делать |
 |---|---|---|
-| `APPLIED` | ПЛК принял запись (для PAC — код 0) | если значение «не меняется»: у PAC программа может игнорировать запись, `docs/FIRMWARE_WRITE_BEHAVIOR.md`; для OPC UA включите `GATEWAY_COMMANDS_VERIFY_MS` |
+| `APPLIED` | ПЛК принял запись (для PAC — код 0) | если значение «не меняется»: программа ПЛК может игнорировать запись, `docs/FIRMWARE_WRITE_BEHAVIOR.md`; включите `GATEWAY_COMMANDS_VERIFY_MS` (OPC UA и PAC) |
 | `FAILED_NOT_APPLIED` | ПЛК принял, но значение не изменилось | программа не разрешает действие (например, клапан не в ручном режиме) |
 | `REJECTED_UNKNOWN_TAG` | тега нет или он выключен; у PAC-тега нет `deviceName`/`fieldName` | проверить имя в `tagName` (оно должно совпасть с `name` в YAML посимвольно) |
 | `REJECTED_NOT_WRITABLE` | `writable: false` или контроллер Modbus | Modbus не пишется никогда; для остальных — `writable: true` и перезапуск |

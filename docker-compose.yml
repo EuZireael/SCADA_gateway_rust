@@ -1,5 +1,7 @@
 # ============================================================================
-# Стенд Rust-шлюза одной командой: postgres + kafka + PLC-симулятор + шлюз.
+# Стенд Rust-шлюза одной командой: postgres + kafka + PLC-симулятор + шлюз. Все каналы базы каналов станции
+# BN1_MCA1 отдаются симулятором и читаются шлюзом по OPC UA (config/stations/BN1_MCA1.yaml).
+# Три протокола (OPC UA + Modbus + PAC) — конфигурации для тестов: simulator/config/replay_config.yaml.
 #
 #   docker compose up -d --build     # поднять (образы соберутся при первом запуске)
 #   docker compose logs -f gateway   # логи шлюза
@@ -10,7 +12,12 @@
 #   8888 — HTTP шлюза (/actuator/health, /actuator/prometheus, /api/*)
 #   9094 — Kafka для монитора и тестов
 #   5433 — PostgreSQL
-#   4840 / 5020 / 10000 — OPC UA / Modbus / PAC симулятора (порт PAC на хосте — SIM_PAC_PORT)
+#   4840 — OPC UA симулятора: все каналы станции (2647) только по OPC UA, Modbus и PAC не поднимаются
+#
+# Два режима, одна и та же станция (те же 2647 каналов, имена, типы):
+#   ./scripts/stand.sh opcua        # по умолчанию: симулятор по OPC UA, шлюз читает config/stations/BN1_MCA1.yaml
+#   ./scripts/stand.sh easydriver   # симулятор по PAC (driver-master), шлюз читает config/stations/BN1_MCA1_easydriver.yaml
+# Режим выбирают две переменные (их задаёт stand.sh): SIM_CONFIG — конфигурация симулятора, GATEWAY_STATION — станция шлюза.
 # ============================================================================
 name: scada-rs
 
@@ -63,21 +70,21 @@ services:
       timeout: 10s
       retries: 15
 
-  # PLC-симулятор: OPC UA + Modbus + PAC в родных форматах, реплей 5-суточного архива BN1_MCA1.
+  # PLC-симулятор станции: все 2647 каналов базы каналов по OPC UA (simulator/config/station_opcua.yaml),
+  # реплей 5-суточного архива BN1_MCA1. Modbus и PAC симулятор умеет, но здесь их теги не заданы — порты закрыты.
   simulator:
     build: ./simulator
     container_name: scada-rs-simulator
+    # Конфигурация станции: station_opcua.yaml — все каналы по OPC UA, station_pac.yaml — все по PAC (EasyDriver).
+    command: ["${SIM_CONFIG:-config/station_opcua.yaml}"]
     environment:
-      # Сервер анонсирует резолвимое в сети имя.
+      # Сервер анонсирует резолвимое в сети имя (в режиме PAC OPC UA-сервер не поднимается).
       OPCUA_ENDPOINT: "opc.tcp://simulator:4840"
-      MODBUS_PORT: "5020"
-      PAC_PORT: "10000"
     ports:
       - "4840:4840"
-      - "5020:5020"
-      - "${SIM_PAC_PORT:-10000}:10000"   # SIM_PAC_PORT — если 10000 на хосте занят (например, настоящим ptusa_main)
+      - "${SIM_PAC_PORT:-10000}:10000"   # только в режиме easydriver; SIM_PAC_PORT — если 10000 на хосте занят (ptusa_main)
     healthcheck:
-      test: ["CMD", "/app/simulator", "healthcheck"]
+      test: ["CMD", "/app/simulator", "healthcheck", "${SIM_CONFIG:-config/station_opcua.yaml}"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -92,9 +99,10 @@ services:
       SPRING_DATASOURCE_USERNAME: "scada_user"
       SPRING_DATASOURCE_PASSWORD: "scada_password"
       SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
-      SIM_HOST: "simulator"
+      PLC_HOST: "simulator"   # режим opcua
+      PAC_HOST: "simulator"   # режим easydriver
     volumes:
-      - ./config/controllers.yaml:/app/config/controllers.yaml:ro
+      - ./config/stations/${GATEWAY_STATION:-BN1_MCA1.yaml}:/app/config/controllers.yaml:ro
     ports:
       - "8888:8888"
     depends_on:
