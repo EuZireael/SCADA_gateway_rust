@@ -39,7 +39,7 @@
 ```bash
 cargo build --release                       # target/release/scada-gateway
 docker compose up -d postgres kafka simulator
-SIM_HOST=127.0.0.1 \
+CONTROLLERS_YAML=config/stations/BN1_MCA1.yaml PLC_HOST=127.0.0.1 \
 SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5433/scada_db \
 SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9094 \
 ./target/release/scada-gateway
@@ -47,7 +47,7 @@ curl localhost:8888/actuator/health
 ```
 
 Стенд целиком (всё в Docker): `docker compose up -d --build`. Станция мойки на настоящей прошивке — `up-moika.sh`
-(`docs/MONITOR_INTEGRATION.md`). Симулятор отдельно: `cd simulator && cargo run --release -- config/replay_config.yaml`.
+(`docs/MONITOR_INTEGRATION.md`). Симулятор отдельно: `cd simulator && cargo run --release` (все каналы станции по OPC UA) или `-- config/replay_config.yaml` (три протокола, как в интеграционных тестах).
 
 Профиль release: thin LTO и `strip`. Fat LTO и `codegen-units=1` проверены и не дали выигрыша по процессору при
 вдвое большем времени сборки, поэтому не включены.

@@ -1,5 +1,7 @@
 # ============================================================================
-# Стенд Rust-шлюза одной командой: postgres + kafka + PLC-симулятор + шлюз.
+# Стенд Rust-шлюза одной командой: postgres + kafka + PLC-симулятор + шлюз. Все каналы базы каналов станции
+# BN1_MCA1 отдаются симулятором и читаются шлюзом по OPC UA (config/stations/BN1_MCA1.yaml).
+# Три протокола (OPC UA + Modbus + PAC) — конфигурации для тестов: simulator/config/replay_config.yaml.
 #
 #   docker compose up -d --build     # поднять (образы соберутся при первом запуске)
 #   docker compose logs -f gateway   # логи шлюза
@@ -10,7 +12,7 @@
 #   8888 — HTTP шлюза (/actuator/health, /actuator/prometheus, /api/*)
 #   9094 — Kafka для монитора и тестов
 #   5433 — PostgreSQL
-#   4840 / 5020 / 10000 — OPC UA / Modbus / PAC симулятора (порт PAC на хосте — SIM_PAC_PORT)
+#   4840 — OPC UA симулятора: все каналы станции (2647) только по OPC UA, Modbus и PAC не поднимаются
 # ============================================================================
 name: scada-rs
 
@@ -63,19 +65,16 @@ services:
       timeout: 10s
       retries: 15
 
-  # PLC-симулятор: OPC UA + Modbus + PAC в родных форматах, реплей 5-суточного архива BN1_MCA1.
+  # PLC-симулятор станции: все 2647 каналов базы каналов по OPC UA (simulator/config/station_opcua.yaml),
+  # реплей 5-суточного архива BN1_MCA1. Modbus и PAC симулятор умеет, но здесь их теги не заданы — порты закрыты.
   simulator:
     build: ./simulator
     container_name: scada-rs-simulator
     environment:
       # Сервер анонсирует резолвимое в сети имя.
       OPCUA_ENDPOINT: "opc.tcp://simulator:4840"
-      MODBUS_PORT: "5020"
-      PAC_PORT: "10000"
     ports:
       - "4840:4840"
-      - "5020:5020"
-      - "${SIM_PAC_PORT:-10000}:10000"   # SIM_PAC_PORT — если 10000 на хосте занят (например, настоящим ptusa_main)
     healthcheck:
       test: ["CMD", "/app/simulator", "healthcheck"]
       interval: 10s
@@ -92,9 +91,9 @@ services:
       SPRING_DATASOURCE_USERNAME: "scada_user"
       SPRING_DATASOURCE_PASSWORD: "scada_password"
       SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
-      SIM_HOST: "simulator"
+      PLC_HOST: "simulator"
     volumes:
-      - ./config/controllers.yaml:/app/config/controllers.yaml:ro
+      - ./config/stations/BN1_MCA1.yaml:/app/config/controllers.yaml:ro
     ports:
       - "8888:8888"
     depends_on:

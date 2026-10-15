@@ -49,7 +49,7 @@ pub enum Effect {
 }
 
 /// Имя поля без пробелов: пробелы в YAML-именах не должны мешать совпадению.
-fn normalized(field: &str) -> String {
+pub fn normalized(field: &str) -> String {
     field.chars().filter(|c| !c.is_whitespace()).collect()
 }
 

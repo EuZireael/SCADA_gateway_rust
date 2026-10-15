@@ -1,9 +1,11 @@
 //! PLC-симулятор для стенда шлюза: OPC UA, Modbus TCP и PAC (driver-master) в одном процессе;
-//! значения тегов проигрываются из 5-суточного архива станции BN1_MCA1.
+//! значения тегов проигрываются из 5-суточного архива станции BN1_MCA1. Поднимаются только те протоколы,
+//! теги которых есть в конфигурации: станционная конфигурация по умолчанию целиком на OPC UA.
 //!
-//!   simulator \[config/replay_config.yaml\]     запуск
-//!   simulator healthcheck                     проверка живости (порты Modbus и PAC) для контейнера
-//!   simulator conformance \[host\] \[port\] \[config\]  проверка: PAC ведёт себя при записи как описано в конфигурации
+//!   simulator \[config/station_opcua.yaml\]     запуск (все каналы базы каналов — OPC UA)
+//!   simulator healthcheck \[config\]             проверка живости (порты настроенных протоколов) для контейнера
+//!   simulator station-config \[станция\] \[прежняя\] \[выход\]  собрать конфигурацию из базы каналов станции
+//!   simulator conformance \[host\] \[port\] \[config\]  проверка (по умолчанию replay_config.yaml): PAC ведёт себя при записи как описано в конфигурации
 //!   simulator probe-pac \[host\] \[port\]         снимок любого PAC (симулятор, прошивка ptusa): по умолчанию localhost:10000
 //!
 //! Окружение: OPCUA_ENDPOINT (напр. opc.tcp://simulator:4840 — адрес привязки и анонса вместо
@@ -19,6 +21,7 @@ mod pac;
 mod pac_client;
 mod plc;
 mod replay;
+mod station;
 mod tag;
 mod value;
 
@@ -71,21 +74,48 @@ fn pac_devices(plc: &Plc) -> Vec<PacDevice> {
     devices
 }
 
-/// `simulator healthcheck`: порты Modbus и PAC принимают соединения (проверка контейнера).
+/// Сколько тегов в конфигурации на каждом протоколе: (Modbus, PAC).
+fn foreign_tags(cfg: &config::Config) -> (usize, usize) {
+    let count =
+        |p: &str| cfg.plc.data_blocks.iter().flat_map(|b| &b.tags).filter(|t| t.protocol.as_deref() == Some(p)).count();
+    (count("modbus"), count("pac"))
+}
+
+/// `simulator healthcheck`: порт OPC UA (по адресу, на котором сервер слушает) и порты тех протоколов, теги которых
+/// есть в конфигурации, принимают соединения (проверка контейнера). Modbus и PAC слушают на всех адресах, а OPC UA —
+/// на адресе из `OPCUA_ENDPOINT` (в Docker это имя сервиса, а не loopback), поэтому ему loopback не подходит.
 async fn healthcheck() -> Result<()> {
     let cfg_path = arg(2).unwrap_or_else(|| DEFAULT_CONFIG.into());
     let cfg = config::load(Path::new(&cfg_path))?;
-    for port in [env_port("MODBUS_PORT", cfg.modbus_port)?, env_port("PAC_PORT", cfg.pac_port)?] {
-        tokio::time::timeout(std::time::Duration::from_secs(2), tokio::net::TcpStream::connect(("127.0.0.1", port)))
+    let endpoint = std::env::var("OPCUA_ENDPOINT").ok().filter(|v| !v.is_empty()).unwrap_or(cfg.plc.endpoint.clone());
+    let (opcua_host, opcua_port) = opcua::parse_endpoint(&endpoint)?;
+    let opcua_host =
+        if matches!(opcua_host.as_str(), "0.0.0.0" | "::" | "[::]") { "127.0.0.1".into() } else { opcua_host };
+    let (modbus, pac) = foreign_tags(&cfg);
+    let mut targets = vec![(opcua_host, opcua_port)];
+    if modbus > 0 {
+        targets.push(("127.0.0.1".into(), env_port("MODBUS_PORT", cfg.modbus_port)?));
+    }
+    if pac > 0 {
+        targets.push(("127.0.0.1".into(), env_port("PAC_PORT", cfg.pac_port)?));
+    }
+    for (host, port) in targets {
+        tokio::time::timeout(std::time::Duration::from_secs(2), tokio::net::TcpStream::connect((host.as_str(), port)))
             .await
-            .with_context(|| format!("порт {port}: таймаут"))?
-            .with_context(|| format!("порт {port}"))?;
+            .with_context(|| format!("{host}:{port}: таймаут"))?
+            .with_context(|| format!("{host}:{port}"))?;
     }
     Ok(())
 }
 
-/// Конфигурация по умолчанию.
-const DEFAULT_CONFIG: &str = "config/replay_config.yaml";
+/// Конфигурация по умолчанию: все каналы базы каналов станции, только OPC UA.
+const DEFAULT_CONFIG: &str = "config/station_opcua.yaml";
+
+/// Конфигурация трёх протоколов (OPC UA, Modbus, PAC): тесты шлюза и проверка соответствия прошивке PAC.
+const MULTIPROTOCOL_CONFIG: &str = "config/replay_config.yaml";
+
+/// База каналов станции, из которой собирается [`DEFAULT_CONFIG`] (путь от папки симулятора).
+const STATION_DATABASE: &str = "../config/stations/BN1_MCA1.yaml";
 
 /// Аргумент командной строки по номеру (после имени подкоманды).
 fn arg(n: usize) -> Option<String> {
@@ -104,11 +134,16 @@ async fn subcommand() -> Option<Result<()>> {
         Some("conformance") => Some(
             async {
                 let host = arg(2).unwrap_or_else(|| "127.0.0.1".into());
-                let cfg = arg(4).unwrap_or_else(|| DEFAULT_CONFIG.into());
+                let cfg = arg(4).unwrap_or_else(|| MULTIPROTOCOL_CONFIG.into());
                 conformance::run(&host, port_arg(3)?, Path::new(&cfg)).await
             }
             .await,
         ),
+        Some("station-config") => Some(station::run(
+            Path::new(&arg(2).unwrap_or_else(|| STATION_DATABASE.into())),
+            Path::new(&arg(3).unwrap_or_else(|| MULTIPROTOCOL_CONFIG.into())),
+            Path::new(&arg(4).unwrap_or_else(|| DEFAULT_CONFIG.into())),
+        )),
         Some("probe-pac") => {
             Some(async { pac::probe(&arg(2).unwrap_or_else(|| "localhost".into()), port_arg(3)?).await }.await)
         }
@@ -213,9 +248,12 @@ async fn main() -> Result<()> {
     );
 
     let regs = Arc::new(modbus::Registers::new());
-    let modbus_listener =
-        TcpListener::bind(("0.0.0.0", env_port("MODBUS_PORT", cfg.modbus_port)?)).await.context("порт Modbus")?;
-    tokio::spawn(modbus::serve(modbus_listener, regs.clone()));
+    // Modbus-сервер — только если в конфигурации есть его теги: станция целиком на OPC UA порт не занимает.
+    if st.modbus > 0 {
+        let listener =
+            TcpListener::bind(("0.0.0.0", env_port("MODBUS_PORT", cfg.modbus_port)?)).await.context("порт Modbus")?;
+        tokio::spawn(modbus::serve(listener, regs.clone()));
+    }
     let pac = start_pac(&plc, &cfg).await?;
     let (server_task, pusher) = start_opcua(&plc, &cfg)?;
     let cycle = spawn_cycle(plc, regs, pusher, pac);

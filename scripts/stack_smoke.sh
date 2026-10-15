@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Дымовой тест стенда целиком: docker-compose.yml (Kafka + Postgres + Rust-симулятор + Rust-шлюз,
+# Дымовой тест стенда целиком: docker-compose.yml (Kafka + Postgres + OPC UA-симулятор станции + Rust-шлюз,
 # образы собираются из исходников) и сбои, которые бывают на объекте:
 #
-#   1. стенд поднимается, все три контроллера на связи, в Kafka — телеметрия всех тегов в формате
+#   1. стенд поднимается, контроллер станции (все каналы базы каналов — OPC UA) на связи, в Kafka — телеметрия всех тегов в формате
 #      монитора ({value, quality, timestamp});
 #   2. команда записи через Kafka → статус APPLIED в scada-command-results;
 #   3. брокер Kafka пропал на 45 с: шлюз жив и опрашивает, после возвращения брокера все теги
 #      отправляются заново (scada_kafka_resyncs_total растёт), а не ждут полной отправки;
 #   4. БД пропала на 30 с: телеметрия идёт, опрос не отстаёт (scada_poll_overruns_total не растёт),
 #      /actuator/health показывает db DOWN, потом UP;
-#   5. симулятор (ПЛК) пропал: все контроллеры DOWN, в Kafka кадры BAD; вернулся — снова UP.
+#   5. симулятор (ПЛК) пропал: контроллер DOWN, в Kafka кадры BAD; вернулся — снова UP.
 #
 #   scripts/stack_smoke.sh            # нужны docker compose, curl, python3; порты 5433, 9094, 8888, 4840
 #   KEEP=1 scripts/stack_smoke.sh     # не гасить стенд после теста
@@ -24,8 +24,8 @@ PROJECT=${COMPOSE_PROJECT_NAME:-scada-smoke}
 DC=(docker compose -p "$PROJECT" -f docker-compose.yml ${COMPOSE_OVERRIDE:+-f "$COMPOSE_OVERRIDE"})
 GW=http://localhost:8888
 TAGS_TOPIC=scada.tags
-TAG_RW='Барановичи-1.BN1_MCA1.M_M.M3.M'
-EXPECTED_TAGS=2517
+TAG_RW='Барановичи-1.BN1_MCA1.LINE1.MAIN_CIP_MODULE.PAR_MAIN[7]'
+EXPECTED_TAGS=1834   # включённые каналы config/stations/BN1_MCA1.yaml
 
 log()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 ok()   { printf '   ✓ %s\n' "$*"; }
@@ -78,7 +78,7 @@ if [ -n "${GATEWAY_BIN:-}" ]; then
   "${DC[@]}" up -d ${NO_BUILD:+--no-build} kafka postgres simulator
   until_ok 120 "Kafka и Postgres готовы" bash -c "[ \"\$(docker inspect -f '{{.State.Health.Status}}' scada-rs-kafka)\" = healthy ] && [ \"\$(docker inspect -f '{{.State.Health.Status}}' scada-rs-postgres)\" = healthy ]"
   GW_LOG=$(mktemp)
-  CONTROLLERS_YAML=config/controllers.yaml SIM_HOST=127.0.0.1 SERVER_PORT=8888 \
+  CONTROLLERS_YAML=config/stations/BN1_MCA1.yaml PLC_HOST=127.0.0.1 SERVER_PORT=8888 \
     SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9094 \
     SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5433/scada_db \
     "$GATEWAY_BIN" >"$GW_LOG" 2>&1 &
@@ -86,8 +86,8 @@ if [ -n "${GATEWAY_BIN:-}" ]; then
 else
   "${DC[@]}" up -d --build
 fi
-until_ok 180 "все контроллеры на связи" controllers_up 3
-ok "шлюз здоров, 3 контроллера UP"
+until_ok 180 "все контроллеры на связи" controllers_up 1
+ok "шлюз здоров, контроллер станции UP"
 kafka_up && ok "Kafka: UP" || fail "компонент kafka не UP"
 db_up && ok "БД: UP"
 
@@ -154,7 +154,7 @@ overruns=$(metric scada_poll_overruns_total); sent_before=$(metric scada_telemet
 "${DC[@]}" stop postgres >/dev/null
 sleep 30
 [ "$(db_status)" = DOWN ] && ok "health: db DOWN" || fail "db не DOWN при остановленной БД"
-controllers_up 3 && ok "контроллеры на связи, опрос идёт" || fail "опрос остановился без БД"
+controllers_up 1 && ok "контроллер на связи, опрос идёт" || fail "опрос остановился без БД"
 [ "$(metric scada_poll_overruns_total)" = "$overruns" ] && ok "опрос не отстаёт" || fail "опрос отстал без БД"
 "${DC[@]}" start postgres >/dev/null
 until_ok 90 "БД: UP" db_up
@@ -162,10 +162,10 @@ ok "БД вернулась, шлюз подключился без переза
 
 log "5. Сбой: ПЛК (симулятор) пропал"
 "${DC[@]}" stop simulator >/dev/null
-until_ok 90 "все контроллеры DOWN" all_controllers_down
-ok "контроллеры DOWN, шлюз жив"
+until_ok 90 "контроллер DOWN" all_controllers_down
+ok "контроллер DOWN, шлюз жив"
 "${DC[@]}" start simulator >/dev/null
-until_ok 120 "контроллеры снова на связи" controllers_up 3
+until_ok 120 "контроллер снова на связи" controllers_up 1
 ok "связь восстановлена без перезапуска шлюза"
 
 log "Стенд прошёл дымовой тест"
