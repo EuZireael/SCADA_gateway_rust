@@ -356,7 +356,13 @@ pub async fn consume_commands<F, Fut>(
                 changed = role.changed() => if changed.is_err() { return },
             }
         }
-        match assigned_consumer(&settings, &topic) {
+        // Создание консьюмера синхронно (метаданные и позиции — до 10 с каждое, пока брокер недоступен): на потоке
+        // рантайма оно держало бы рабочий поток и останавливало соседние задачи, в том числе чтение ПЛК (ложная «потеря связи»).
+        let (cfg, topic_name) = (settings.clone(), topic.clone());
+        let created = tokio::task::spawn_blocking(move || assigned_consumer(&cfg, &topic_name))
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("задача создания консьюмера: {e}")));
+        match created {
             Ok(consumer) => {
                 info!("▶ Приём команд включён: {topic}");
                 consume_while_active(&consumer, &leadership, &mut role, &cancel, &handler).await;
