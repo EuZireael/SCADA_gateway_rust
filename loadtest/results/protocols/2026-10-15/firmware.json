@@ -2,7 +2,6 @@
   "source": "firmware",
   "date": "2026-10-15",
   "modes": [
-    "easydriver",
     "opcua"
   ],
   "coverage": {
@@ -122,196 +121,44 @@
       "process_p99_ms": 0
     }
   },
-  "clients": {
-    "easydriver@1": {
-      "window_s": 30.0,
-      "gateway_cores": 0.097,
-      "gateway_rss_mb": 21,
-      "source_cores": {
-        "plc": 0.077
-      },
-      "values_per_s": 18379,
-      "kafka_per_s": 64.9,
-      "poll_overruns": 0,
-      "send_errors": 0,
-      "cycle_mean_ms": 17.81,
-      "cycle_p99_ms": 50,
-      "process_mean_ms": 0.17,
-      "process_p99_ms": 0,
-      "gateways": 1
-    },
-    "easydriver@2": {
-      "window_s": 30.0,
-      "gateway_cores": 0.193,
-      "gateway_rss_mb": 42,
-      "source_cores": {
-        "plc": 0.088
-      },
-      "values_per_s": 18376,
-      "kafka_per_s": 65.0,
-      "poll_overruns": 0,
-      "send_errors": 0,
-      "cycle_mean_ms": 18.15,
-      "cycle_p99_ms": 50,
-      "process_mean_ms": 0.17,
-      "process_p99_ms": 0,
-      "gateways": 2
-    },
-    "easydriver@4": {
-      "window_s": 30.0,
-      "gateway_cores": 0.424,
-      "gateway_rss_mb": 86,
-      "source_cores": {
-        "plc": 0.11
-      },
-      "values_per_s": 18312,
-      "kafka_per_s": 64.6,
-      "poll_overruns": 0,
-      "send_errors": 0,
-      "cycle_mean_ms": 14.45,
-      "cycle_p99_ms": 25,
-      "process_mean_ms": 0.19,
-      "process_p99_ms": 0,
-      "gateways": 4
-    },
-    "easydriver@8": {
-      "window_s": 30.1,
-      "gateway_cores": 0.864,
-      "gateway_rss_mb": 173,
-      "source_cores": {
-        "plc": 0.154
-      },
-      "values_per_s": 18369,
-      "kafka_per_s": 65.1,
-      "poll_overruns": 0,
-      "send_errors": 0,
-      "cycle_mean_ms": 19.17,
-      "cycle_p99_ms": 50,
-      "process_mean_ms": 0.21,
-      "process_p99_ms": 0,
-      "gateways": 8
-    },
-    "opcua@1": {
-      "window_s": 30.0,
-      "gateway_cores": 0.038,
-      "gateway_rss_mb": 24,
-      "source_cores": {
-        "plc": 0.068,
-        "facade": 0.059
-      },
-      "values_per_s": 18381,
-      "kafka_per_s": 64.9,
-      "poll_overruns": 0,
-      "send_errors": 0,
-      "cycle_mean_ms": 7.05,
-      "cycle_p99_ms": 10,
-      "process_mean_ms": 0.17,
-      "process_p99_ms": 0,
-      "gateways": 1
-    },
-    "opcua@2": {
-      "window_s": 30.0,
-      "gateway_cores": 0.076,
-      "gateway_rss_mb": 49,
-      "source_cores": {
-        "plc": 0.068,
-        "facade": 0.1
-      },
-      "values_per_s": 18318,
-      "kafka_per_s": 64.7,
-      "poll_overruns": 0,
-      "send_errors": 0,
-      "cycle_mean_ms": 7.2,
-      "cycle_p99_ms": 25,
-      "process_mean_ms": 0.18,
-      "process_p99_ms": 0,
-      "gateways": 2
-    },
-    "opcua@4": {
-      "window_s": 30.0,
-      "gateway_cores": 0.144,
-      "gateway_rss_mb": 99,
-      "source_cores": {
-        "plc": 0.055,
-        "facade": 0.17
-      },
-      "values_per_s": 18315,
-      "kafka_per_s": 64.7,
-      "poll_overruns": 0,
-      "send_errors": 0,
-      "cycle_mean_ms": 6.66,
-      "cycle_p99_ms": 10,
-      "process_mean_ms": 0.15,
-      "process_p99_ms": 0,
-      "gateways": 4
-    },
-    "opcua@8": {
-      "window_s": 30.0,
-      "gateway_cores": 0.291,
-      "gateway_rss_mb": 204,
-      "source_cores": {
-        "plc": 0.055,
-        "facade": 0.315
-      },
-      "values_per_s": 18372,
-      "kafka_per_s": 64.9,
-      "poll_overruns": 0,
-      "send_errors": 0,
-      "cycle_mean_ms": 6.57,
-      "cycle_p99_ms": 10,
-      "process_mean_ms": 0.12,
-      "process_p99_ms": 0,
-      "gateways": 8
-    }
-  },
   "writes": {
     "easydriver": {
       "effective": [
         {
           "status": "APPLIED",
+          "result_ms": 890,
+          "effect_ms": 119
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 861,
+          "effect_ms": 704
+        },
+        {
+          "status": "APPLIED",
           "result_ms": 872,
-          "effect_ms": 348
+          "effect_ms": 381
         },
         {
           "status": "APPLIED",
-          "result_ms": 864,
-          "effect_ms": 959
+          "result_ms": 854,
+          "effect_ms": 1034
         },
         {
           "status": "APPLIED",
-          "result_ms": 852,
-          "effect_ms": 561
+          "result_ms": 866,
+          "effect_ms": 1048
         },
         {
           "status": "APPLIED",
-          "result_ms": 856,
-          "effect_ms": 246
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 864,
-          "effect_ms": 932
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 856,
-          "effect_ms": 545
+          "result_ms": 865,
+          "effect_ms": 421
         }
       ],
       "ignored": [
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 846,
-          "effect_ms": null
-        },
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 867,
-          "effect_ms": null
-        },
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 857,
+          "result_ms": 859,
           "effect_ms": null
         },
         {
@@ -321,12 +168,22 @@
         },
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 870,
+          "result_ms": 849,
           "effect_ms": null
         },
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 908,
+          "result_ms": 862,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 849,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 869,
           "effect_ms": null
         }
       ]
@@ -335,64 +192,64 @@
       "effective": [
         {
           "status": "APPLIED",
-          "result_ms": 873,
-          "effect_ms": 873
+          "result_ms": 1146,
+          "effect_ms": 1276
         },
         {
           "status": "APPLIED",
-          "result_ms": 856,
-          "effect_ms": 143
+          "result_ms": 848,
+          "effect_ms": 522
         },
         {
           "status": "APPLIED",
-          "result_ms": 857,
-          "effect_ms": 266
+          "result_ms": 840,
+          "effect_ms": 1231
         },
         {
           "status": "APPLIED",
-          "result_ms": 873,
-          "effect_ms": 110
+          "result_ms": 849,
+          "effect_ms": 549
         },
         {
           "status": "APPLIED",
-          "result_ms": 866,
-          "effect_ms": 860
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 877,
+          "result_ms": 844,
           "effect_ms": 1249
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 848,
+          "effect_ms": 529
         }
       ],
       "ignored": [
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 861,
+          "result_ms": 851,
           "effect_ms": null
         },
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 864,
+          "result_ms": 842,
           "effect_ms": null
         },
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 865,
+          "result_ms": 851,
           "effect_ms": null
         },
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 876,
+          "result_ms": 842,
           "effect_ms": null
         },
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 866,
+          "result_ms": 844,
           "effect_ms": null
         },
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 891,
+          "result_ms": 854,
           "effect_ms": null
         }
       ]
@@ -412,205 +269,104 @@
       "good_channels": 1834
     }
   },
-  "writes_fast": {
-    "easydriver": {
-      "effective": [
-        {
-          "status": "APPLIED",
-          "result_ms": 887,
-          "effect_ms": 123
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 857,
-          "effect_ms": 112
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 858,
-          "effect_ms": 107
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 858,
-          "effect_ms": 101
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 850,
-          "effect_ms": 133
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 851,
-          "effect_ms": 98
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 873,
-          "effect_ms": 89
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 855,
-          "effect_ms": 115
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 862,
-          "effect_ms": 93
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 860,
-          "effect_ms": 126
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 861,
-          "effect_ms": 134
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 867,
-          "effect_ms": 83
-        }
-      ],
-      "ignored": [
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 851,
-          "effect_ms": null
-        },
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 865,
-          "effect_ms": null
-        },
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 875,
-          "effect_ms": null
-        },
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 864,
-          "effect_ms": null
-        },
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 859,
-          "effect_ms": null
-        },
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 854,
-          "effect_ms": null
-        },
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 846,
-          "effect_ms": null
-        },
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 858,
-          "effect_ms": null
-        },
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 853,
-          "effect_ms": null
-        },
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 854,
-          "effect_ms": null
-        },
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 852,
-          "effect_ms": null
-        },
-        {
-          "status": "FAILED_NOT_APPLIED",
-          "result_ms": 867,
-          "effect_ms": null
-        }
-      ]
-    },
+  "writes_fast_facade100": {
     "opcua": {
       "effective": [
         {
           "status": "APPLIED",
-          "result_ms": 846,
-          "effect_ms": 132
+          "result_ms": 1129,
+          "effect_ms": 376
         },
         {
           "status": "APPLIED",
           "result_ms": 844,
-          "effect_ms": 262
+          "effect_ms": 253
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 843,
+          "effect_ms": 166
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 850,
+          "effect_ms": 173
         },
         {
           "status": "APPLIED",
           "result_ms": 848,
-          "effect_ms": 478
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 848,
-          "effect_ms": 226
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 844,
-          "effect_ms": 453
+          "effect_ms": 157
         },
         {
           "status": "APPLIED",
           "result_ms": 845,
-          "effect_ms": 283
+          "effect_ms": 135
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 844,
+          "effect_ms": 160
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 842,
+          "effect_ms": 220
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 838,
+          "effect_ms": 141
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 840,
+          "effect_ms": 144
         },
         {
           "status": "APPLIED",
           "result_ms": 849,
-          "effect_ms": 518
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 837,
           "effect_ms": 165
         },
         {
           "status": "APPLIED",
-          "result_ms": 835,
-          "effect_ms": 374
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 846,
-          "effect_ms": 615
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 852,
-          "effect_ms": 336
-        },
-        {
-          "status": "APPLIED",
-          "result_ms": 857,
-          "effect_ms": 516
+          "result_ms": 856,
+          "effect_ms": 154
         }
       ],
       "ignored": [
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 858,
+          "result_ms": 850,
           "effect_ms": null
         },
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 849,
+          "result_ms": 843,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 842,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 844,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 848,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 839,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 855,
           "effect_ms": null
         },
         {
@@ -620,22 +376,428 @@
         },
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 853,
+          "result_ms": 841,
           "effect_ms": null
         },
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 853,
+          "result_ms": 835,
           "effect_ms": null
         },
         {
           "status": "FAILED_NOT_APPLIED",
+          "result_ms": 840,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 854,
+          "effect_ms": null
+        }
+      ]
+    }
+  },
+  "clients_facade100": {
+    "opcua@1": {
+      "window_s": 30.0,
+      "gateway_cores": 0.034,
+      "gateway_rss_mb": 25,
+      "source_cores": {
+        "plc": 0.064,
+        "facade": 0.115
+      },
+      "values_per_s": 18320,
+      "kafka_per_s": 64.9,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 6.68,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.14,
+      "process_p99_ms": 0,
+      "gateways": 1
+    },
+    "opcua@2": {
+      "window_s": 30.0,
+      "gateway_cores": 0.069,
+      "gateway_rss_mb": 49,
+      "source_cores": {
+        "plc": 0.065,
+        "facade": 0.152
+      },
+      "values_per_s": 18319,
+      "kafka_per_s": 64.9,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 7.09,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.14,
+      "process_p99_ms": 0,
+      "gateways": 2
+    },
+    "opcua@4": {
+      "window_s": 30.0,
+      "gateway_cores": 0.14,
+      "gateway_rss_mb": 103,
+      "source_cores": {
+        "plc": 0.064,
+        "facade": 0.226
+      },
+      "values_per_s": 18318,
+      "kafka_per_s": 64.9,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 6.83,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.12,
+      "process_p99_ms": 0,
+      "gateways": 4
+    },
+    "opcua@8": {
+      "window_s": 30.0,
+      "gateway_cores": 0.276,
+      "gateway_rss_mb": 201,
+      "source_cores": {
+        "plc": 0.064,
+        "facade": 0.363
+      },
+      "values_per_s": 18377,
+      "kafka_per_s": 65.1,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 6.19,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.14,
+      "process_p99_ms": 0,
+      "gateways": 8
+    }
+  },
+  "writes_fast_facade50": {
+    "opcua": {
+      "effective": [
+        {
+          "status": "APPLIED",
+          "result_ms": 955,
+          "effect_ms": 258
+        },
+        {
+          "status": "APPLIED",
           "result_ms": 849,
+          "effect_ms": 132
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 840,
+          "effect_ms": 138
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 836,
+          "effect_ms": 80
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 853,
+          "effect_ms": 140
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 849,
+          "effect_ms": 113
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 861,
+          "effect_ms": 148
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 841,
+          "effect_ms": 138
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 848,
+          "effect_ms": 164
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 851,
+          "effect_ms": 109
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 855,
+          "effect_ms": 141
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 859,
+          "effect_ms": 199
+        }
+      ],
+      "ignored": [
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 842,
           "effect_ms": null
         },
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 839,
+          "result_ms": 857,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 845,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 859,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 851,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 851,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 843,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 852,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 841,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 847,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 850,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 858,
+          "effect_ms": null
+        }
+      ]
+    }
+  },
+  "writes_fast": {
+    "easydriver": {
+      "effective": [
+        {
+          "status": "APPLIED",
+          "result_ms": 907,
+          "effect_ms": 101
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 843,
+          "effect_ms": 71
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 850,
+          "effect_ms": 62
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 848,
+          "effect_ms": 132
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 866,
+          "effect_ms": 138
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 861,
+          "effect_ms": 120
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 870,
+          "effect_ms": 91
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 871,
+          "effect_ms": 65
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 862,
+          "effect_ms": 83
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 844,
+          "effect_ms": 74
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 841,
+          "effect_ms": 84
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 861,
+          "effect_ms": 136
+        }
+      ],
+      "ignored": [
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 842,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 882,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 858,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 862,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 863,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 854,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 877,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 856,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 879,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 872,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 866,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 860,
+          "effect_ms": null
+        }
+      ]
+    },
+    "opcua": {
+      "effective": [
+        {
+          "status": "APPLIED",
+          "result_ms": 1201,
+          "effect_ms": 449
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 854,
+          "effect_ms": 138
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 860,
+          "effect_ms": 203
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 849,
+          "effect_ms": 293
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 854,
+          "effect_ms": 419
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 851,
+          "effect_ms": 661
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 843,
+          "effect_ms": 167
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 844,
+          "effect_ms": 297
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 845,
+          "effect_ms": 424
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 842,
+          "effect_ms": 556
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 855,
+          "effect_ms": 152
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 849,
+          "effect_ms": 264
+        }
+      ],
+      "ignored": [
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 848,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 844,
           "effect_ms": null
         },
         {
@@ -650,7 +812,7 @@
         },
         {
           "status": "FAILED_NOT_APPLIED",
-          "result_ms": 844,
+          "result_ms": 856,
           "effect_ms": null
         },
         {
@@ -660,10 +822,251 @@
         },
         {
           "status": "FAILED_NOT_APPLIED",
+          "result_ms": 857,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 848,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
           "result_ms": 847,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 842,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 846,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 849,
           "effect_ms": null
         }
       ]
+    }
+  },
+  "clients": {
+    "easydriver@1": {
+      "window_s": 30.0,
+      "gateway_cores": 0.081,
+      "gateway_rss_mb": 22,
+      "source_cores": {
+        "plc": 0.064
+      },
+      "values_per_s": 18322,
+      "kafka_per_s": 64.9,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 16.52,
+      "cycle_p99_ms": 50,
+      "process_mean_ms": 0.13,
+      "process_p99_ms": 0,
+      "gateways": 1
+    },
+    "easydriver@2": {
+      "window_s": 30.0,
+      "gateway_cores": 0.167,
+      "gateway_rss_mb": 43,
+      "source_cores": {
+        "plc": 0.074
+      },
+      "values_per_s": 18325,
+      "kafka_per_s": 64.7,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 16.46,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.13,
+      "process_p99_ms": 0,
+      "gateways": 2
+    },
+    "easydriver@4": {
+      "window_s": 30.0,
+      "gateway_cores": 0.347,
+      "gateway_rss_mb": 86,
+      "source_cores": {
+        "plc": 0.089
+      },
+      "values_per_s": 18321,
+      "kafka_per_s": 64.7,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 16.54,
+      "cycle_p99_ms": 50,
+      "process_mean_ms": 0.15,
+      "process_p99_ms": 0,
+      "gateways": 4
+    },
+    "easydriver@8": {
+      "window_s": 30.0,
+      "gateway_cores": 0.816,
+      "gateway_rss_mb": 174,
+      "source_cores": {
+        "plc": 0.144
+      },
+      "values_per_s": 18377,
+      "kafka_per_s": 64.9,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 22.08,
+      "cycle_p99_ms": 50,
+      "process_mean_ms": 0.13,
+      "process_p99_ms": 0,
+      "gateways": 8
+    },
+    "opcua@1": {
+      "window_s": 30.0,
+      "gateway_cores": 0.036,
+      "gateway_rss_mb": 25,
+      "source_cores": {
+        "plc": 0.057,
+        "facade": 0.055
+      },
+      "values_per_s": 18320,
+      "kafka_per_s": 64.7,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 6.56,
+      "cycle_p99_ms": 10,
+      "process_mean_ms": 0.15,
+      "process_p99_ms": 0,
+      "gateways": 1
+    },
+    "opcua@2": {
+      "window_s": 30.0,
+      "gateway_cores": 0.07,
+      "gateway_rss_mb": 49,
+      "source_cores": {
+        "plc": 0.054,
+        "facade": 0.091
+      },
+      "values_per_s": 18321,
+      "kafka_per_s": 64.7,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 6.61,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.15,
+      "process_p99_ms": 0,
+      "gateways": 2
+    },
+    "opcua@4": {
+      "window_s": 382.3,
+      "gateway_cores": 0.011,
+      "gateway_rss_mb": 102,
+      "source_cores": {
+        "plc": 0.005,
+        "facade": 0.013
+      },
+      "values_per_s": 1353,
+      "kafka_per_s": 5.1,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 7.0,
+      "cycle_p99_ms": 50,
+      "process_mean_ms": 0.17,
+      "process_p99_ms": 1,
+      "gateways": 4
+    },
+    "opcua@8": {
+      "window_s": 30.0,
+      "gateway_cores": 0.286,
+      "gateway_rss_mb": 200,
+      "source_cores": {
+        "plc": 0.055,
+        "facade": 0.316
+      },
+      "values_per_s": 18314,
+      "kafka_per_s": 64.9,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 6.78,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.15,
+      "process_p99_ms": 0,
+      "gateways": 8
+    }
+  },
+  "clients_redo": {
+    "opcua@1": {
+      "window_s": 30.0,
+      "gateway_cores": 0.038,
+      "gateway_rss_mb": 25,
+      "source_cores": {
+        "plc": 0.07,
+        "facade": 0.06
+      },
+      "values_per_s": 18318,
+      "kafka_per_s": 64.9,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 7.2,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.17,
+      "process_p99_ms": 0,
+      "gateways": 1
+    },
+    "opcua@2": {
+      "window_s": 30.6,
+      "gateway_cores": 0.076,
+      "gateway_rss_mb": 50,
+      "source_cores": {
+        "plc": 0.068,
+        "facade": 0.1
+      },
+      "values_per_s": 18061,
+      "kafka_per_s": 63.9,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 7.33,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.18,
+      "process_p99_ms": 0,
+      "gateways": 2
+    },
+    "opcua@4": {
+      "window_s": 30.0,
+      "gateway_cores": 0.145,
+      "gateway_rss_mb": 100,
+      "source_cores": {
+        "plc": 0.057,
+        "facade": 0.17
+      },
+      "values_per_s": 18317,
+      "kafka_per_s": 64.9,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 6.73,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.17,
+      "process_p99_ms": 0,
+      "gateways": 4
+    },
+    "opcua@8": {
+      "window_s": 30.0,
+      "gateway_cores": 0.29,
+      "gateway_rss_mb": 201,
+      "source_cores": {
+        "plc": 0.055,
+        "facade": 0.316
+      },
+      "values_per_s": 18311,
+      "kafka_per_s": 64.7,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 6.72,
+      "cycle_p99_ms": 10,
+      "process_mean_ms": 0.15,
+      "process_p99_ms": 0,
+      "gateways": 8
     }
   }
 }
