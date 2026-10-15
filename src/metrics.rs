@@ -40,6 +40,8 @@ pub struct Metrics {
     pub telemetry_rows_dropped: IntCounter,
     /// Доставка в Kafka восстановилась после сбоя — тегам запущена повторная отправка.
     pub kafka_resyncs: IntCounter,
+    /// Очередь продюсера переполнена (брокер не успевает): телеметрия тега уйдёт следующим циклом опроса.
+    pub kafka_queue_full: IntCounter,
     /// Перезапуски задач шлюза надзирателем (`task` — имя задачи).
     pub task_restarts: IntCounterVec,
     /// Неудачные записи в БД (`kind`: events, history, config).
@@ -129,6 +131,10 @@ impl Metrics {
             kafka_resyncs: counter(
                 "scada_kafka_resyncs_total",
                 "Доставка в Kafka восстановилась после сбоя: все теги отправлены заново",
+            ),
+            kafka_queue_full: counter(
+                "scada_kafka_queue_full_total",
+                "Очередь продюсера Kafka переполнена: сообщение не принято, тег отправится следующим циклом",
             ),
             task_restarts,
             db_write_errors,

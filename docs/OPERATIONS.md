@@ -161,6 +161,7 @@ docker run -d --name scada-gateway -p 8888:8888 \
 | `scada_telemetry_sent_total`, `scada_telemetry_suppressed_total` | отправлено / подавлено повторов («по исключению») |
 | `scada_kafka_send_errors_total` | недоставленные сообщения; растёт при обрыве брокера |
 | `scada_kafka_resyncs_total` | доставка восстановилась после сбоя — все теги отправлены заново |
+| `scada_kafka_queue_full_total` | очередь продюсера переполнена (брокер не успевает): тег отправится следующим циклом опроса, повторной отправки всех тегов нет. Растёт постоянно — брокеру не хватает мощности или раздела |
 | `scada_controllers_connected` / `_total` | контроллеров на связи / всего |
 | `scada_poll_seconds`, `scada_poll_overruns_total` | цикл опроса; **overruns > 0 — шлюз не успевает за периодом** |
 | `scada_process_seconds` | обработка цикла (скрипты, фильтры, алармы) |

@@ -127,8 +127,13 @@ impl Processor {
                         state.phase,
                     )
                 {
-                    kafka.send_telemetry(&r.tag.name, &TelemetryMessage { value, quality, timestamp: r.timestamp });
-                    sent += 1;
+                    if kafka.send_telemetry(&r.tag.name, &TelemetryMessage { value, quality, timestamp: r.timestamp }) {
+                        sent += 1;
+                    } else {
+                        // Очередь продюсера полна (брокер не успевает): забываем, что тег опубликован, —
+                        // следующий цикл опроса отправит его первым же делом. Остальные теги это не трогает.
+                        state.published = None;
+                    }
                 } else {
                     suppressed += 1;
                 }
@@ -632,6 +637,27 @@ mod processor_tests {
         let text = r.app.metrics.render();
         assert!(text.contains("scada_telemetry_sent_total{application=\"scada-gateway\"} 3"), "{text}");
         assert!(text.contains("scada_telemetry_suppressed_total{application=\"scada-gateway\"} 2"), "{text}");
+    }
+
+    #[test]
+    fn a_full_producer_queue_defers_only_that_tag_to_the_next_cycle() {
+        let mut r = rig(|_| {}, &[("A", "INT32"), ("B", "INT32")], None, false);
+        r.kafka.reject_next.store(1, std::sync::atomic::Ordering::SeqCst); // А не принято, Б принято
+        r.cycle(0, &[(0, i(1), Good), (1, i(2), Good)]);
+        assert_eq!(r.sent_values(), [("B".into(), serde_json::json!(2))]);
+        // Значения не менялись, но А не ушло — оно уходит следующим циклом; Б — повтор, подавлен.
+        r.cycle(2, &[(0, i(1), Good), (1, i(2), Good)]);
+        assert_eq!(r.sent_values(), [("A".into(), serde_json::json!(1))]);
+        r.cycle(4, &[(0, i(1), Good), (1, i(2), Good)]);
+        assert!(r.sent().is_empty(), "дальше всё по исключению");
+        assert_eq!(
+            r.kafka.delivery().resync_epoch(),
+            0,
+            "переполнение очереди не запускает повторную отправку всех тегов"
+        );
+        let text = r.app.metrics.render();
+        assert!(text.contains("scada_kafka_queue_full_total{application=\"scada-gateway\"} 1"), "{text}");
+        assert!(text.contains("scada_telemetry_sent_total{application=\"scada-gateway\"} 2"), "{text}");
     }
 
     #[test]
