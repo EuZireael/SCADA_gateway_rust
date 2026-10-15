@@ -168,12 +168,16 @@ jobs:
   # Стенд целиком (docker-compose.yml: Kafka + Postgres + Rust-симулятор + Rust-шлюз, образы из исходников)
   # и сбои, которые бывают на объекте: пропал брокер, БД, ПЛК. См. scripts/stack_smoke.sh.
   stack:
-    name: Stack smoke (docker compose + сбои Kafka, БД, ПЛК)
+    name: Stack smoke (${{ matrix.mode }}: docker compose + сбои Kafka, БД, ПЛК)
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [opcua, easydriver]   # как шлюз читает ту же станцию: OPC UA или PAC (EasyDriver)
     steps:
       - uses: actions/checkout@v7
-      - run: scripts/stack_smoke.sh
+      - run: MODE=${{ matrix.mode }} scripts/stack_smoke.sh
 
   # Производительность на масштабе стенда из контракта «по исключению»: 27 400 тегов (10 OPC UA-серверов ×
   # 2740, треть меняется каждую секунду), шлюз процессом, Kafka в Docker. Падает, если опрос отстаёт,

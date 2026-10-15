@@ -1,4 +1,5 @@
-//! `simulator station-config`: конфигурация симулятора из базы каналов станции, все теги — по OPC UA.
+//! `simulator station-config [opcua|pac]`: конфигурация симулятора из базы каналов станции, все теги — по одному
+//! протоколу: OPC UA (по умолчанию) или PAC (driver-master, «EasyDriver»).
 //!
 //! Источник истины по составу каналов — `config/stations/<станция>.yaml` (его генерирует
 //! `tools/station_config.sh` из `.cdbx` монитора). Симулятор должен отдавать **ровно эти** каналы, с теми же
@@ -7,7 +8,8 @@
 //!
 //! Правила сборки:
 //! * тег на каждый канал базы (включая выключенные в `.cdbx`: сервер их отдаёт, шлюз просто не опрашивает);
-//! * протокол — всегда `opcua`; адрес — `s=` из `nodeId` канала;
+//! * протокол — один на все теги (`opcua` или `pac`); адрес — `s=` из `nodeId` канала, а у станции для PAC
+//!   (`pac:…`) — `<прибор>.<поле без пробелов>`: это ключ снимка PAC и тот же адрес, что у узла OPC UA;
 //! * если такой прибор и поле были в прежней (трёхпротокольной) конфигурации — оттуда берутся источник значения
 //!   из архива, правила записи прошивки, единица и начальное значение: поведение, снятое с эмулятора мойки,
 //!   не теряется. Остальные каналы получают нулевое значение своего типа и доступ по `writable` канала;
@@ -187,7 +189,8 @@ fn tag_line(pairs: &[(String, Y)]) -> String {
 }
 
 /// Собрать текст конфигурации симулятора. Чистая функция: файлы читает [`run`].
-pub fn build(station_yaml: &str, legacy_yaml: &str, source: &str) -> Result<(String, Report)> {
+pub fn build(station_yaml: &str, legacy_yaml: &str, source: &str, protocol: &str) -> Result<(String, Report)> {
+    anyhow::ensure!(matches!(protocol, "opcua" | "pac"), "протокол {protocol:?}: ожидается opcua или pac");
     let station: StationFile = serde_yaml_ng::from_str(station_yaml).context("файл станции не разобран")?;
     let legacy = Legacy::parse(legacy_yaml)?;
     let channels: Vec<&StationTag> = station.opcua.servers.iter().flat_map(|s| &s.tags).collect();
@@ -198,10 +201,12 @@ pub fn build(station_yaml: &str, legacy_yaml: &str, source: &str) -> Result<(Str
     let mut used: HashSet<(String, String)> = HashSet::new();
     let mut lines = Vec::with_capacity(channels.len());
     for ch in &channels {
-        let address = ch
-            .node_id
-            .strip_prefix(NODE_PREFIX)
-            .with_context(|| format!("nodeId {:?}: ожидается {NODE_PREFIX}<прибор>.<поле>", ch.node_id))?;
+        let address = match ch.node_id.strip_prefix(NODE_PREFIX) {
+            Some(a) => a.to_string(),
+            None if protocol == "pac" => format!("{}.{}", ch.device_name, normalized(&ch.field_name)),
+            None => bail!("nodeId {:?}: ожидается {NODE_PREFIX}<прибор>.<поле>", ch.node_id),
+        };
+        let address = address.as_str();
         let ty = sim_type(&ch.data_type)?;
         let key = (ch.device_name.clone(), normalized(&ch.field_name));
         let old = legacy.tags.get(&key);
@@ -217,9 +222,12 @@ pub fn build(station_yaml: &str, legacy_yaml: &str, source: &str) -> Result<(Str
             ("name".into(), Y::String(address.into())),
             ("address".into(), Y::String(address.into())),
             ("type".into(), Y::String(ty.into())),
-            ("protocol".into(), Y::String("opcua".into())),
+            ("protocol".into(), Y::String(protocol.into())),
             ("device".into(), Y::String(ch.device_name.clone())),
-            ("field".into(), Y::String(ch.field_name.clone())),
+            (
+                "field".into(),
+                Y::String(if protocol == "pac" { normalized(&ch.field_name) } else { ch.field_name.clone() }),
+            ),
             ("dev_type".into(), Y::String(ch.device_type.clone())),
             ("access".into(), Y::String(access)),
             ("initial".into(), old.and_then(|m| m.get("initial")).cloned().unwrap_or_else(|| zero(ty))),
@@ -257,21 +265,34 @@ pub fn build(station_yaml: &str, legacy_yaml: &str, source: &str) -> Result<(Str
     let text = |k: &str, d: &str| str_of(plc, k).unwrap_or_else(|| d.into());
     let replay = legacy.root.get("replay").map(flow).unwrap_or_else(|| "{enabled: false}".into());
     let mut out = String::new();
+    let (what, node, mode) = if protocol == "pac" {
+        (
+            "PAC (driver-master, протокол «EasyDriver»; Modbus и OPC UA-узлы не поднимаются)",
+            "Ключ снимка — <прибор>.<поле>, шлюзу нужен config/stations/*_easydriver.yaml",
+            "OPC UA — station_opcua.yaml",
+        )
+    } else {
+        (
+            "OPC UA (Modbus и PAC не поднимаются)",
+            "Адрес узла — ns=2;s=<прибор>.<поле>, как у OPC UA-фасада эмулятора мойки (ptusa-opcua/): шлюзу нужен один и тот же config/stations/*.yaml",
+            "PAC — station_pac.yaml; три протокола (тесты) — replay_config.yaml",
+        )
+    };
     out.push_str(&format!(
         "# ============================================================================\n\
-         # Симулятор станции: ВСЕ каналы базы каналов — по OPC UA (Modbus и PAC не поднимаются).\n\
-         # СГЕНЕРИРОВАНО `simulator station-config` из {source} и прежней трёхпротокольной\n\
+         # Симулятор станции: ВСЕ каналы базы каналов — по {what}.\n\
+         # СГЕНЕРИРОВАНО `simulator station-config {protocol}` из {source} и прежней трёхпротокольной\n\
          # конфигурации (replay_config.yaml) — не править руками: поправьте источник и пересоберите.\n\
          #   каналов {}, включено в базе {}; с прежним описанием (архив, правила прошивки) {}, новых (статических) {}\n\
-         # Адрес узла — ns=2;s=<прибор>.<поле>, как у OPC UA-фасада эмулятора мойки (ptusa-opcua/): шлюзу нужен\n\
-         # один и тот же config/stations/*.yaml. Режим трёх протоколов (тесты) — replay_config.yaml.\n\
+         # {node}.\n\
+         # Тот же набор каналов по другому протоколу: {mode}.\n\
          # ============================================================================\n",
         report.channels, report.enabled, report.inherited, report.fresh
     ));
     out.push_str(&format!(
         "plc:\n  id: {}\n  name: {}\n  endpoint: {}\n  update_rate: {}\n  data_blocks:\n    - db_number: 1\n      name: {}\n      tags:\n",
         text("id", "STATION"),
-        flow(&Y::String(format!("{} OPC UA", text("id", "STATION")))),
+        flow(&Y::String(format!("{} {}", text("id", "STATION"), if protocol == "pac" { "PAC" } else { "OPC UA" }))),
         text("endpoint", "opc.tcp://0.0.0.0:4840"),
         text("update_rate", "0.5"),
         text("id", "STATION").replace('-', "_"),
@@ -291,11 +312,11 @@ fn requires_exists(requires: &Y, own_device: &str, known: &HashSet<(String, Stri
     str_of(m, "field").is_some_and(|f| known.contains(&(device, normalized(&f))))
 }
 
-/// `simulator station-config <станция.yaml> <прежняя.yaml> <выход.yaml>`.
-pub fn run(station: &Path, legacy: &Path, out: &Path) -> Result<()> {
+/// `simulator station-config [opcua|pac] <станция.yaml> <прежняя.yaml> <выход.yaml>`.
+pub fn run(protocol: &str, station: &Path, legacy: &Path, out: &Path) -> Result<()> {
     let read = |p: &Path| std::fs::read_to_string(p).with_context(|| p.display().to_string());
     let source = station.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let (text, r) = build(&read(station)?, &read(legacy)?, &format!("config/stations/{source}"))?;
+    let (text, r) = build(&read(station)?, &read(legacy)?, &format!("config/stations/{source}"), protocol)?;
     std::fs::write(out, text).with_context(|| out.display().to_string())?;
     println!(
         "{}: каналов {} (включено {}), с прежним описанием {}, новых {}; \
@@ -344,7 +365,7 @@ replay: {enabled: true, data_path: data/archive_replay.bin.gz, speed: 1.0, loop:
 
     #[test]
     fn every_channel_becomes_an_opcua_tag_with_the_node_address() {
-        let (text, r) = build(STATION, LEGACY, "config/stations/t.yaml").unwrap();
+        let (text, r) = build(STATION, LEGACY, "config/stations/t.yaml", "opcua").unwrap();
         assert_eq!(
             r,
             Report { channels: 4, enabled: 3, inherited: 3, fresh: 1, dropped_requires: 0, legacy_unused: 1 }
@@ -375,7 +396,7 @@ replay: {enabled: true, data_path: data/archive_replay.bin.gz, speed: 1.0, loop:
             .replace("\"V1.M\"", "\"V1.X\"")
             .replace("ns=2;s=V1.M", "ns=2;s=V1.X")
             .replace("fieldName: \"M\"", "fieldName: \"X\"");
-        let (text, r) = build(&station, LEGACY, "t").unwrap();
+        let (text, r) = build(&station, LEGACY, "t", "opcua").unwrap();
         assert_eq!(r.dropped_requires, 1);
         let cfg: config::Config = serde_yaml_ng::from_str(&text).unwrap();
         assert!(Plc::new(&cfg, None).is_ok(), "без условия-сироты ПЛК собирается");
@@ -383,8 +404,8 @@ replay: {enabled: true, data_path: data/archive_replay.bin.gz, speed: 1.0, loop:
 
     #[test]
     fn unknown_channel_type_or_node_format_is_an_error() {
-        assert!(build(&STATION.replace("INT32", "INT64"), LEGACY, "t").is_err());
-        assert!(build(&STATION.replace("ns=2;s=V1.ST", "ns=3;s=V1.ST"), LEGACY, "t").is_err());
+        assert!(build(&STATION.replace("INT32", "INT64"), LEGACY, "t", "opcua").is_err());
+        assert!(build(&STATION.replace("ns=2;s=V1.ST", "ns=3;s=V1.ST"), LEGACY, "t", "opcua").is_err());
     }
 
     /// Файл в репозитории — ровно то, что даёт генератор из базы каналов станции: ни один канал не потерян,
@@ -395,7 +416,7 @@ replay: {enabled: true, data_path: data/archive_replay.bin.gz, speed: 1.0, loop:
         let station = std::fs::read_to_string(root.join("../config/stations/BN1_MCA1.yaml")).unwrap();
         let legacy = std::fs::read_to_string(root.join("config/replay_config.yaml")).unwrap();
         let committed = std::fs::read_to_string(root.join("config/station_opcua.yaml")).unwrap();
-        let (fresh, r) = build(&station, &legacy, "config/stations/BN1_MCA1.yaml").unwrap();
+        let (fresh, r) = build(&station, &legacy, "config/stations/BN1_MCA1.yaml", "opcua").unwrap();
         assert_eq!(committed, fresh, "station_opcua.yaml устарел: `simulator station-config`");
         assert_eq!((r.channels, r.enabled), (2647, 1834));
 
@@ -406,5 +427,24 @@ replay: {enabled: true, data_path: data/archive_replay.bin.gz, speed: 1.0, loop:
         let plc = Plc::new(&cfg, None).unwrap();
         let st = plc.stats();
         assert_eq!((st.opcua, st.modbus, st.pac), (2647, 0, 0));
+    }
+
+    /// То же по PAC («EasyDriver»): все 2647 каналов, ни одного по другому протоколу, а в снимке PAC есть каждое поле.
+    #[test]
+    fn repository_pac_config_covers_the_whole_channel_database_over_pac() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let station = std::fs::read_to_string(root.join("../config/stations/BN1_MCA1.yaml")).unwrap();
+        let legacy = std::fs::read_to_string(root.join("config/replay_config.yaml")).unwrap();
+        let committed = std::fs::read_to_string(root.join("config/station_pac.yaml")).unwrap();
+        let (fresh, r) = build(&station, &legacy, "config/stations/BN1_MCA1.yaml", "pac").unwrap();
+        assert_eq!(committed, fresh, "station_pac.yaml устарел: `simulator station-config pac`");
+        assert_eq!((r.channels, r.enabled), (2647, 1834));
+
+        let cfg = config::load(&root.join("config/station_pac.yaml")).unwrap();
+        let plc = Plc::new(&cfg, None).unwrap();
+        let st = plc.stats();
+        assert_eq!((st.opcua, st.modbus, st.pac), (0, 0, 2647));
+        // Поля PAC — без пробелов в индексе: иначе шлюз (и драйвер) не нашли бы их в снимке.
+        assert!(plc.tags().iter().all(|t| !t.field.as_deref().unwrap_or_default().contains(' ')));
     }
 }

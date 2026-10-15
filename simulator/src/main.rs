@@ -4,7 +4,7 @@
 //!
 //!   simulator \[config/station_opcua.yaml\]     запуск (все каналы базы каналов — OPC UA)
 //!   simulator healthcheck \[config\]             проверка живости (порты настроенных протоколов) для контейнера
-//!   simulator station-config \[станция\] \[прежняя\] \[выход\]  собрать конфигурацию из базы каналов станции
+//!   simulator station-config \[opcua|pac\] \[станция\] \[прежняя\] \[выход\]  собрать конфигурацию из базы каналов станции
 //!   simulator conformance \[host\] \[port\] \[config\]  проверка (по умолчанию replay_config.yaml): PAC ведёт себя при записи как описано в конфигурации
 //!   simulator probe-pac \[host\] \[port\]         снимок любого PAC (симулятор, прошивка ptusa): по умолчанию localhost:10000
 //!
@@ -74,15 +74,21 @@ fn pac_devices(plc: &Plc) -> Vec<PacDevice> {
     devices
 }
 
-/// Сколько тегов в конфигурации на каждом протоколе: (Modbus, PAC).
-fn foreign_tags(cfg: &config::Config) -> (usize, usize) {
-    let count =
-        |p: &str| cfg.plc.data_blocks.iter().flat_map(|b| &b.tags).filter(|t| t.protocol.as_deref() == Some(p)).count();
-    (count("modbus"), count("pac"))
+/// Сколько тегов в конфигурации на каждом протоколе: (OPC UA, Modbus, PAC).
+fn protocol_tags(cfg: &config::Config) -> (usize, usize, usize) {
+    let count = |p: &str| {
+        cfg.plc
+            .data_blocks
+            .iter()
+            .flat_map(|b| &b.tags)
+            .filter(|t| t.protocol.as_deref().unwrap_or("opcua") == p)
+            .count()
+    };
+    (count("opcua"), count("modbus"), count("pac"))
 }
 
-/// `simulator healthcheck`: порт OPC UA (по адресу, на котором сервер слушает) и порты тех протоколов, теги которых
-/// есть в конфигурации, принимают соединения (проверка контейнера). Modbus и PAC слушают на всех адресах, а OPC UA —
+/// `simulator healthcheck`: порты тех протоколов, теги которых есть в конфигурации, принимают соединения (проверка
+/// контейнера). Modbus и PAC слушают на всех адресах, а OPC UA —
 /// на адресе из `OPCUA_ENDPOINT` (в Docker это имя сервиса, а не loopback), поэтому ему loopback не подходит.
 async fn healthcheck() -> Result<()> {
     let cfg_path = arg(2).unwrap_or_else(|| DEFAULT_CONFIG.into());
@@ -91,8 +97,11 @@ async fn healthcheck() -> Result<()> {
     let (opcua_host, opcua_port) = opcua::parse_endpoint(&endpoint)?;
     let opcua_host =
         if matches!(opcua_host.as_str(), "0.0.0.0" | "::" | "[::]") { "127.0.0.1".into() } else { opcua_host };
-    let (modbus, pac) = foreign_tags(&cfg);
-    let mut targets = vec![(opcua_host, opcua_port)];
+    let (opcua_tags, modbus, pac) = protocol_tags(&cfg);
+    let mut targets = Vec::new();
+    if opcua_tags > 0 {
+        targets.push((opcua_host, opcua_port));
+    }
     if modbus > 0 {
         targets.push(("127.0.0.1".into(), env_port("MODBUS_PORT", cfg.modbus_port)?));
     }
@@ -111,6 +120,9 @@ async fn healthcheck() -> Result<()> {
 /// Конфигурация по умолчанию: все каналы базы каналов станции, только OPC UA.
 const DEFAULT_CONFIG: &str = "config/station_opcua.yaml";
 
+/// Конфигурация «EasyDriver»: все каналы станции только по PAC (driver-master).
+const PAC_CONFIG: &str = "config/station_pac.yaml";
+
 /// Конфигурация трёх протоколов (OPC UA, Modbus, PAC): тесты шлюза и проверка соответствия прошивке PAC.
 const MULTIPROTOCOL_CONFIG: &str = "config/replay_config.yaml";
 
@@ -127,6 +139,19 @@ fn port_arg(n: usize) -> Result<u16> {
     Ok(arg(n).map(|p| p.parse()).transpose().context("порт")?.unwrap_or(10000))
 }
 
+/// `simulator station-config [opcua|pac] [станция] [прежняя] [выход]`: конфигурация из базы каналов станции.
+fn station_config() -> Result<()> {
+    let mut args: Vec<String> = std::env::args().skip(2).collect();
+    let protocol =
+        if matches!(args.first().map(String::as_str), Some("opcua" | "pac")) { args.remove(0) } else { "opcua".into() };
+    let default_out = if protocol == "pac" { PAC_CONFIG } else { DEFAULT_CONFIG };
+    let mut it = args.into_iter();
+    let station = it.next().unwrap_or_else(|| STATION_DATABASE.into());
+    let legacy = it.next().unwrap_or_else(|| MULTIPROTOCOL_CONFIG.into());
+    let out = it.next().unwrap_or_else(|| default_out.into());
+    station::run(&protocol, Path::new(&station), Path::new(&legacy), Path::new(&out))
+}
+
 /// Служебные подкоманды (`healthcheck`, `conformance`, `probe-pac`); `None` — обычный запуск симулятора.
 async fn subcommand() -> Option<Result<()>> {
     match arg(1).as_deref() {
@@ -139,11 +164,7 @@ async fn subcommand() -> Option<Result<()>> {
             }
             .await,
         ),
-        Some("station-config") => Some(station::run(
-            Path::new(&arg(2).unwrap_or_else(|| STATION_DATABASE.into())),
-            Path::new(&arg(3).unwrap_or_else(|| MULTIPROTOCOL_CONFIG.into())),
-            Path::new(&arg(4).unwrap_or_else(|| DEFAULT_CONFIG.into())),
-        )),
+        Some("station-config") => Some(station_config()),
         Some("probe-pac") => {
             Some(async { pac::probe(&arg(2).unwrap_or_else(|| "localhost".into()), port_arg(3)?).await }.await)
         }
@@ -205,7 +226,7 @@ fn start_opcua(plc: &Arc<Plc>, cfg: &config::Config) -> Result<(tokio::task::Joi
 fn spawn_cycle(
     plc: Arc<Plc>,
     regs: Arc<modbus::Registers>,
-    pusher: opcua::Pusher,
+    pusher: Option<opcua::Pusher>,
     pac: Option<Arc<PacModel>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -217,7 +238,9 @@ fn spawn_cycle(
                 _ = plc.wake.notified() => {}
             }
             let out = plc.cycle(&regs);
-            pusher.push(&out.opcua);
+            if let Some(pusher) = &pusher {
+                pusher.push(&out.opcua);
+            }
             if let Some(pac) = &pac {
                 let snapshot: HashMap<String, value::Value> = out.pac;
                 pac.update_snapshot(snapshot);
@@ -255,14 +278,22 @@ async fn main() -> Result<()> {
         tokio::spawn(modbus::serve(listener, regs.clone()));
     }
     let pac = start_pac(&plc, &cfg).await?;
-    let (server_task, pusher) = start_opcua(&plc, &cfg)?;
+    // OPC UA-сервер — тоже только если есть его теги: станция целиком на PAC («EasyDriver») порт 4840 не занимает.
+    let (server_task, pusher) = if st.opcua > 0 {
+        let (task, pusher) = start_opcua(&plc, &cfg)?;
+        (Some(task), Some(pusher))
+    } else {
+        (None, None)
+    };
     let cycle = spawn_cycle(plc, regs, pusher, pac);
 
     info!("Симулятор запущен, остановка — Ctrl+C / SIGTERM");
     shutdown_signal().await;
     info!("Останавливаю симулятор");
     cycle.abort();
-    server_task.abort();
+    if let Some(task) = server_task {
+        task.abort();
+    }
     Ok(())
 }
 

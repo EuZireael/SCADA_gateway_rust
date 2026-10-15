@@ -13,6 +13,11 @@
 #   9094 — Kafka для монитора и тестов
 #   5433 — PostgreSQL
 #   4840 — OPC UA симулятора: все каналы станции (2647) только по OPC UA, Modbus и PAC не поднимаются
+#
+# Два режима, одна и та же станция (те же 2647 каналов, имена, типы):
+#   ./scripts/stand.sh opcua        # по умолчанию: симулятор по OPC UA, шлюз читает config/stations/BN1_MCA1.yaml
+#   ./scripts/stand.sh easydriver   # симулятор по PAC (driver-master), шлюз читает config/stations/BN1_MCA1_easydriver.yaml
+# Режим выбирают две переменные (их задаёт stand.sh): SIM_CONFIG — конфигурация симулятора, GATEWAY_STATION — станция шлюза.
 # ============================================================================
 name: scada-rs
 
@@ -70,13 +75,16 @@ services:
   simulator:
     build: ./simulator
     container_name: scada-rs-simulator
+    # Конфигурация станции: station_opcua.yaml — все каналы по OPC UA, station_pac.yaml — все по PAC (EasyDriver).
+    command: ["${SIM_CONFIG:-config/station_opcua.yaml}"]
     environment:
-      # Сервер анонсирует резолвимое в сети имя.
+      # Сервер анонсирует резолвимое в сети имя (в режиме PAC OPC UA-сервер не поднимается).
       OPCUA_ENDPOINT: "opc.tcp://simulator:4840"
     ports:
       - "4840:4840"
+      - "${SIM_PAC_PORT:-10000}:10000"   # только в режиме easydriver; SIM_PAC_PORT — если 10000 на хосте занят (ptusa_main)
     healthcheck:
-      test: ["CMD", "/app/simulator", "healthcheck"]
+      test: ["CMD", "/app/simulator", "healthcheck", "${SIM_CONFIG:-config/station_opcua.yaml}"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -91,9 +99,10 @@ services:
       SPRING_DATASOURCE_USERNAME: "scada_user"
       SPRING_DATASOURCE_PASSWORD: "scada_password"
       SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
-      PLC_HOST: "simulator"
+      PLC_HOST: "simulator"   # режим opcua
+      PAC_HOST: "simulator"   # режим easydriver
     volumes:
-      - ./config/stations/BN1_MCA1.yaml:/app/config/controllers.yaml:ro
+      - ./config/stations/${GATEWAY_STATION:-BN1_MCA1.yaml}:/app/config/controllers.yaml:ro
     ports:
       - "8888:8888"
     depends_on:

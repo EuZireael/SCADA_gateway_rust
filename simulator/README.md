@@ -9,6 +9,7 @@
 | Конфигурация | Что отдаёт | Для чего |
 |---|---|---|
 | `config/station_opcua.yaml` (**по умолчанию**) | **все 2647 каналов базы каналов станции — только по OPC UA** (порты Modbus и PAC закрыты); адрес узла `ns=2;s=<прибор>.<поле>`, как у OPC UA-фасада эмулятора мойки (`ptusa-opcua/`) | стенд `docker compose`, демонстрация, нагрузка; шлюзу нужен тот же `config/stations/BN1_MCA1.yaml`, что и для фасада |
+| `config/station_pac.yaml` | **те же 2647 каналов только по PAC** (driver-master, протокол «EasyDriver»): поля без пробелов в индексах, порты Modbus и OPC UA закрыты; для сравнения протоколов (`docs/PROTOCOL_COMPARISON.md`) |
 | `config/replay_config.yaml` | 2517 тегов в трёх протоколах (OPC UA 2133, Modbus 212, PAC 173) | интеграционные тесты Modbus и PAC, проверка соответствия прошивке PAC |
 
 Умеет три протокола:
@@ -43,7 +44,7 @@ docker build -t simulator ./simulator                   # образ (испол
 | Команда | Что делает |
 |---|---|
 | `simulator healthcheck [конфигурация]` | проверка живости (порт OPC UA и порты Modbus и PAC, если в конфигурации есть их теги, принимают соединения) — для `HEALTHCHECK` контейнера |
-| `simulator station-config [станция] [прежняя] [выход]` | собрать `station_opcua.yaml` из базы каналов станции (`../config/stations/BN1_MCA1.yaml`): тег на каждый канал, все по OPC UA; описание архива и правил прошивки берётся из прежней конфигурации (`config/replay_config.yaml`) по паре прибор + поле. Тест `station::repository_config_covers_the_whole_channel_database_over_opcua` падает, если файл в репозитории устарел |
+| `simulator station-config [opcua\|pac] [станция] [прежняя] [выход]` | собрать `station_opcua.yaml` (или `station_pac.yaml`) из базы каналов станции (`../config/stations/BN1_MCA1.yaml`): тег на каждый канал, все по OPC UA; описание архива и правил прошивки берётся из прежней конфигурации (`config/replay_config.yaml`) по паре прибор + поле. Тест `station::repository_config_covers_the_whole_channel_database_over_opcua` падает, если файл в репозитории устарел |
 | `simulator conformance [хост] [порт] [конфигурация]` | проверка **любого** PAC (симулятора или настоящей прошивки): для каждого записываемого PAC-тега записать значение, подождать, перечитать и сравнить с тем, что должна оставить прошивка по правилам из конфигурации. Ненулевой код выхода — расхождение. По умолчанию `127.0.0.1 10000 config/replay_config.yaml` (в `station_opcua.yaml` PAC-тегов нет) |
 | `simulator probe-pac [хост] [порт]` | напечатать handshake, объектную модель и снимок любого PAC; по умолчанию `localhost:10000` |
 

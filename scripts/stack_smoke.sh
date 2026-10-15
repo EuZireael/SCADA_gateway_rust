@@ -13,6 +13,7 @@
 #   5. симулятор (ПЛК) пропал: контроллер DOWN, в Kafka кадры BAD; вернулся — снова UP.
 #
 #   scripts/stack_smoke.sh            # нужны docker compose, curl, python3; порты 5433, 9094, 8888, 4840
+#   MODE=easydriver scripts/stack_smoke.sh   # та же станция и те же проверки, но шлюз читает её по PAC (EasyDriver), порт 10000
 #   KEEP=1 scripts/stack_smoke.sh     # не гасить стенд после теста
 #   GATEWAY_BIN=target/release/scada-gateway scripts/stack_smoke.sh   # шлюз — процессом на хосте (без сборки его образа)
 #   NO_BUILD=1 — вместе с GATEWAY_BIN: образ симулятора не пересобирать (тег $PROJECT-simulator должен существовать)
@@ -20,6 +21,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+MODE=${MODE:-opcua}   # opcua | easydriver: как шлюз читает ту же станцию
+case "$MODE" in
+  opcua)      export SIM_CONFIG=config/station_opcua.yaml GATEWAY_STATION=BN1_MCA1.yaml ;;
+  easydriver) export SIM_CONFIG=config/station_pac.yaml   GATEWAY_STATION=BN1_MCA1_easydriver.yaml ;;
+  *) echo "MODE: opcua или easydriver" >&2; exit 2 ;;
+esac
 PROJECT=${COMPOSE_PROJECT_NAME:-scada-smoke}
 DC=(docker compose -p "$PROJECT" -f docker-compose.yml ${COMPOSE_OVERRIDE:+-f "$COMPOSE_OVERRIDE"})
 GW=http://localhost:8888
@@ -72,13 +79,13 @@ kafka_consume() { # <топик> <макс. сообщений> <таймаут 
     --topic "$1" --max-messages "$2" --timeout-ms "$3" --property print.key=true "${@:4}" 2>/dev/null
 }
 
-log "1. Стенд: сборка образов и запуск"
+log "1. Стенд ($MODE): сборка образов и запуск"
 if [ -n "${GATEWAY_BIN:-}" ]; then
   # Шлюз — процесс на хосте (например, когда образ шлюза собрать негде); остальное — в Docker.
   "${DC[@]}" up -d ${NO_BUILD:+--no-build} kafka postgres simulator
   until_ok 120 "Kafka и Postgres готовы" bash -c "[ \"\$(docker inspect -f '{{.State.Health.Status}}' scada-rs-kafka)\" = healthy ] && [ \"\$(docker inspect -f '{{.State.Health.Status}}' scada-rs-postgres)\" = healthy ]"
   GW_LOG=$(mktemp)
-  CONTROLLERS_YAML=config/stations/BN1_MCA1.yaml PLC_HOST=127.0.0.1 SERVER_PORT=8888 \
+  CONTROLLERS_YAML=config/stations/$GATEWAY_STATION PLC_HOST=127.0.0.1 PAC_HOST=127.0.0.1 PAC_PORT=${SIM_PAC_PORT:-10000} SERVER_PORT=8888 \
     SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9094 \
     SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5433/scada_db \
     "$GATEWAY_BIN" >"$GW_LOG" 2>&1 &
