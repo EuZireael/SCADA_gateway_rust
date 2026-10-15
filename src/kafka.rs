@@ -197,7 +197,9 @@ impl KafkaOut {
     /// сам повторит сообщение в следующем цикле. Прочие ошибки постановки считаются сбоем доставки.
     fn send_raw(&self, topic: &str, key: &str, payload: &[u8]) -> bool {
         if cfg!(test) {
-            if self.reject_next.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1)).is_ok() {
+            // Тестовый хук (один поток): отказать следующему сообщению, пока счётчик не обнулится.
+            if self.reject_next.load(Ordering::Acquire) > 0 {
+                self.reject_next.fetch_sub(1, Ordering::AcqRel);
                 self.metrics.kafka_queue_full.inc();
                 return false;
             }

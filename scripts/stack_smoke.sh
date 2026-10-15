@@ -138,11 +138,13 @@ ok "команда → APPLIED"
 
 log "3. Сбой: брокер Kafka пропал на 45 с"
 sent_before=$(metric scada_telemetry_sent_total); resyncs_before=$(metric scada_kafka_resyncs_total)
+overruns_before=$(metric scada_poll_overruns_total)
 "${DC[@]}" stop kafka >/dev/null
 sleep 45
 health >/dev/null || fail "шлюз не отвечает при недоступном Kafka"
 [ "$(kafka_status)" = DOWN ] && ok "health: kafka DOWN, шлюз жив" || fail "kafka не DOWN при остановленном брокере"
-[ "$(metric scada_poll_overruns_total)" = 0 ] && ok "опрос не отстаёт" || fail "опрос отстал при недоступном Kafka"
+# Сравниваем с моментом до сбоя: пропуск цикла при запуске стенда (медленная машина) к Kafka не относится.
+[ "$(metric scada_poll_overruns_total)" = "$overruns_before" ] && ok "опрос не отстаёт" || fail "опрос отстал при недоступном Kafka"
 "${DC[@]}" start kafka >/dev/null
 resyncs_grew() { [ "$(metric scada_kafka_resyncs_total)" -gt "$resyncs_before" ]; }
 until_ok 120 "повторная отправка после возвращения брокера (scada_kafka_resyncs_total)" resyncs_grew
