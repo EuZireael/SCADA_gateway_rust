@@ -2,8 +2,12 @@
 //! секунду. Масштаб из контракта «телеметрия по исключению»: 20 контроллеров по 2740 тегов
 //! (54 800 тегов), треть тегов меняется каждую секунду (≈18 000 изменений/с).
 //!
-//!   loadsim run     [--servers 20] [--tags 2740] [--base-port 4900] [--fraction 0.3333] [--period-ms 1000]
-//!   loadsim config  [--servers 20] [--tags 2740] [--base-port 4900] [--poll-ms 2000] > controllers.yaml
+//!   loadsim run     [--servers 20] [--tags 2740] [--base-port 4900] [--first 0] [--fraction 0.3333] [--period-ms 1000]
+//!   loadsim config  [--servers 20] [--tags 2740] [--base-port 4900] [--first 0] [--poll-ms 2000] > controllers.yaml
+//!
+//! `--first` — номер первого сервера: порт `base-port + номер`, имя `LOAD-<номер>`. Нужен, чтобы источник из сотен
+//! серверов разнести по нескольким процессам (`loadsim run --first 0 --servers 50`, `loadsim run --first 50 …`):
+//! один процесс упирается в свой процессор раньше, чем шлюз.
 //!
 //! Узел `ns=2;s=<j>`, тип — Float (2/3) или Int32 (1/3), как на станции; имя тега в конфиге —
 //! `LOAD-<i>.T<j>.V`. Значение меняют по кругу окном в `fraction` узлов — за 1/fraction периодов
@@ -18,14 +22,17 @@ use opcua::server::node_manager::memory::{SimpleNodeManager, simple_node_manager
 use opcua::server::{ServerBuilder, ServerHandle};
 use opcua::types::{DataValue, MessageSecurityMode, NodeId, Variant};
 
-/// Параметры запуска из командной строки: `--servers`, `--tags`, `--base-port`, `--fraction`, `--period-ms`, `--poll-ms`.
+/// Параметры запуска из командной строки: `--servers`, `--tags`, `--base-port`, `--first`, `--fraction`, `--period-ms`,
+/// `--poll-ms`.
 struct Args {
     /// Сколько OPC UA-серверов поднять (по одному на порт).
     servers: usize,
     /// Сколько узлов в каждом сервере.
     tags: usize,
-    /// Порт первого сервера; остальные — следом.
+    /// Порт сервера номер 0; сервер номер `n` слушает `base_port + n`.
     base_port: u16,
+    /// Номер первого сервера этого процесса.
+    first: usize,
     /// Доля узлов, меняющихся каждый период.
     fraction: f64,
     /// Период изменения значений, мс.
@@ -38,13 +45,14 @@ struct Args {
 fn args() -> (String, Args) {
     let mut it = std::env::args().skip(1);
     let cmd = it.next().unwrap_or_else(|| "run".into());
-    let mut a = Args { servers: 20, tags: 2740, base_port: 4900, fraction: 1.0 / 3.0, period_ms: 1000, poll_ms: 2000 };
+    let mut a = Args { servers: 20, tags: 2740, base_port: 4900, first: 0, fraction: 1.0 / 3.0, period_ms: 1000, poll_ms: 2000 };
     while let Some(flag) = it.next() {
         let value = it.next().unwrap_or_default();
         match flag.as_str() {
             "--servers" => a.servers = value.parse().expect("--servers"),
             "--tags" => a.tags = value.parse().expect("--tags"),
             "--base-port" => a.base_port = value.parse().expect("--base-port"),
+            "--first" => a.first = value.parse().expect("--first"),
             "--fraction" => a.fraction = value.parse().expect("--fraction"),
             "--period-ms" => a.period_ms = value.parse().expect("--period-ms"),
             "--poll-ms" => a.poll_ms = value.parse().expect("--poll-ms"),
@@ -62,7 +70,7 @@ fn is_float(j: usize) -> bool {
 /// Печатает `controllers.yaml` для шлюза: N контроллеров по M тегов (`loadsim config`).
 fn config(a: &Args) {
     println!("opcua:\n  servers:");
-    for i in 0..a.servers {
+    for i in a.first..a.first + a.servers {
         println!("    - id: load-{i}\n      name: \"Load-{i}\"");
         println!("      endpoint: \"opc.tcp://${{SIM_HOST:127.0.0.1}}:{}\"\n      enabled: true\n      tags:", a.base_port as usize + i);
         for j in 0..a.tags {
@@ -129,15 +137,15 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let mut servers = Vec::new();
-    for i in 0..a.servers {
+    for i in a.first..a.first + a.servers {
         servers.push(start_server(i, &a).await?);
     }
     let window = ((a.tags as f64 * a.fraction).ceil() as usize).max(1);
     eprintln!(
         "loadsim: {} серверов :{}…:{}, по {} узлов, меняется {} узлов/с на сервер ({} изменений/с всего)",
         a.servers,
-        a.base_port,
-        a.base_port as usize + a.servers - 1,
+        a.base_port as usize + a.first,
+        a.base_port as usize + a.first + a.servers - 1,
         a.tags,
         window as f64 * 1000.0 / a.period_ms as f64,
         (window * a.servers) as f64 * 1000.0 / a.period_ms as f64
