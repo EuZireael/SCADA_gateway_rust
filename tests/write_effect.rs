@@ -1,6 +1,7 @@
 //! Проверка эффекта записи (`GATEWAY_COMMANDS_VERIFY_MS`): прошивка принимает команду на клапан линии с кодом 0,
 //! но значением управляет программа — пока клапан не переведён в ручной режим (M=1), он остаётся прежним.
-//! Шлюз с включённой проверкой отвечает `FAILED_NOT_APPLIED`; в ручном режиме — `APPLIED`.
+//! Шлюз с включённой проверкой отвечает `FAILED_NOT_APPLIED`; в ручном режиме — `APPLIED`. Проверка одна и та же для
+//! OPC UA и PAC («EasyDriver»): код 0 PAC говорит только «команду приняли».
 //!
 //!   cargo test --test write_effect -- --ignored      (симулятор + Kafka, см. tests/common)
 
@@ -17,9 +18,13 @@ use common::gateway::{Gateway, consumer_from_beginning, kafka_config};
 use common::{OP_TIMEOUT, controller, controllers_path, toggled};
 use scada_gateway::model::ControllerKind;
 use scada_gateway::opcua::{self, OpcConnection};
+use scada_gateway::pac::{self, PacConnection};
 
 const VALVE_ST: &str = "Барановичи-1.BN1_MCA1.V_ST_2.LINE2V0.ST";
 const VALVE_M: &str = "Барановичи-1.BN1_MCA1.V_M_2.LINE2V0.M";
+/// Тот же главный клапан линии 1, но по PAC (LINE1V0).
+const PAC_VALVE_ST: &str = "Барановичи-1.BN1_MCA1.V_ST_1.LINE1V0.ST";
+const PAC_VALVE_M: &str = "Барановичи-1.BN1_MCA1.V_M_1.LINE1V0.M";
 
 /// Отправить команду через Kafka и вернуть JSON результата.
 async fn command(gw: &Gateway, producer: &FutureProducer, results: &StreamConsumer, tag: &str, value: Value) -> Value {
@@ -74,5 +79,39 @@ async fn write_to_a_program_owned_valve_is_reported_as_not_applied_until_manual_
 
     // Вернуть автоматику.
     let r = command(&gw, &producer, &results, VALVE_M, json!(0)).await;
+    assert_eq!(r["status"], "APPLIED", "{r}");
+}
+
+/// То же по PAC («EasyDriver»): прошивка принимает команду с кодом 0, а значением владеет программа. Без проверки шлюз
+/// сказал бы `APPLIED`; с `GATEWAY_COMMANDS_VERIFY_MS` — `FAILED_NOT_APPLIED`, а в ручном режиме `APPLIED`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "нужны симулятор и Kafka: cargo test -- --ignored"]
+async fn pac_write_to_a_program_owned_valve_is_reported_as_not_applied_until_manual_mode() {
+    let ctrl = controller(ControllerKind::Pac);
+    let (host, port) = pac::endpoint(&ctrl.endpoint);
+    let mut conn = PacConnection::connect(&host, port, OP_TIMEOUT).await.expect("нужен симулятор");
+    conn.poll_states().await.unwrap();
+    let current = conn.read_value("LINE1V0", "ST", "INT32").expect("LINE1V0.ST в снимке");
+    drop(conn);
+    let opposite = json!(toggled(&current).as_f64().unwrap() as i64);
+
+    let gw = Gateway::start_with(&controllers_path(), &[("GATEWAY_COMMANDS_VERIFY_MS", "1500")]);
+    let producer: FutureProducer = kafka_config().create().unwrap();
+    let results = consumer_from_beginning(&gw.topic("results")).await;
+
+    // Автоматический режим: команда принята, значение осталось за программой.
+    let r = command(&gw, &producer, &results, PAC_VALVE_ST, opposite.clone()).await;
+    assert_eq!(r["status"], "FAILED_NOT_APPLIED", "{r}");
+    assert_eq!(r["success"], false);
+
+    // Ручной режим (M=1): запись действует.
+    let r = command(&gw, &producer, &results, PAC_VALVE_M, json!(1)).await;
+    assert_eq!(r["status"], "APPLIED", "{r}");
+    let r = command(&gw, &producer, &results, PAC_VALVE_ST, opposite).await;
+    assert_eq!(r["status"], "APPLIED", "{r}");
+    assert_eq!(r["success"], true);
+
+    // Вернуть автоматику.
+    let r = command(&gw, &producer, &results, PAC_VALVE_M, json!(0)).await;
     assert_eq!(r["status"], "APPLIED", "{r}");
 }

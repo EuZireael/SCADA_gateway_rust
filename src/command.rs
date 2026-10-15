@@ -144,7 +144,7 @@ pub async fn execute(app: &App, cmd: &CommandMessage) -> Outcome {
     let write = Write { tag: &tag, data_type, value, operator_value };
     match tag.protocol {
         Protocol::OpcUa => write_opcua(app, &controller, write).await,
-        Protocol::Pac => write_pac(&controller, write).await,
+        Protocol::Pac => write_pac(app, &controller, write).await,
         Protocol::Modbus => unreachable!("отсечено выше"),
     }
 }
@@ -202,9 +202,10 @@ async fn write_opcua(app: &App, controller: &crate::app::ControllerHandle, w: Wr
     }
 }
 
-/// Запись по PAC: `set_cmd` устройство.поле = значение; код 0 — принято.
-async fn write_pac(controller: &crate::app::ControllerHandle, w: Write<'_>) -> Outcome {
-    let Write { tag, value, operator_value, .. } = w;
+/// Запись по PAC: `set_cmd` устройство.поле = значение; код 0 — принято. При `GATEWAY_COMMANDS_VERIFY_MS` — с проверкой
+/// эффекта, как у OPC UA: код 0 говорит только «команду приняли», а значением может владеть программа ПЛК.
+async fn write_pac(app: &App, controller: &crate::app::ControllerHandle, w: Write<'_>) -> Outcome {
+    let Write { tag, data_type, value, operator_value } = w;
     let (Some(device), Some(field)) = (tag.device_name.as_deref(), tag.field_name.as_deref()) else {
         return Outcome::fail("REJECTED_UNKNOWN_TAG", format!("У PAC-тега нет device/field для команды: {}", tag.name));
     };
@@ -213,13 +214,37 @@ async fn write_pac(controller: &crate::app::ControllerHandle, w: Write<'_>) -> O
     if let Err(e) = lua::command_text(device, field, &value) {
         return Outcome::fail("REJECTED_TYPE_MISMATCH", format!("{e}"));
     }
+    let verify = app.settings.gateway.command_verify;
     let mut guard = controller.pac.lock().await;
     let Some(conn) = guard.as_mut() else {
         return Outcome::fail("FAILED_WRITE", "Команда PAC не выполнена (нет активного соединения)");
     };
+    // Значение до записи — из последнего снимка опроса: им отличают «запись не подействовала» от «значение и так было таким».
+    let before = if verify.is_zero() { None } else { conn.read_value(device, field, data_type) };
     match conn.exec_command(device, field, &value).await {
         Ok(0) => {
             info!("✍ PAC записано {device}.{field} = {}", value);
+            if let Some(before) = before {
+                // Даём ПЛК применить команду на своём цикле; соединение на это время отпускаем — опрос не ждёт.
+                drop(guard);
+                tokio::time::sleep(verify).await;
+                let mut guard = controller.pac.lock().await;
+                if let Some(conn) = guard.as_mut()
+                    && conn.poll_states().await.is_ok()
+                    && let Some(after) = conn.read_value(device, field, data_type)
+                    && !same_value(&after, &value)
+                    && same_value(&after, &before)
+                {
+                    warn!("⚠ {}: команда принята, но значение осталось {after} (записано {value})", tag.name);
+                    return Outcome::fail(
+                        "FAILED_NOT_APPLIED",
+                        format!(
+                            "Контроллер принял команду, но значение не изменилось: {after} (записано {value}); \
+                             вероятно, программа не разрешает действие при текущих условиях"
+                        ),
+                    );
+                }
+            }
             Outcome::applied_converted(value, operator_value)
         }
         Ok(code) => Outcome::fail("FAILED_WRITE", format!("PAC не выполнил команду {device}.{field} (код {code})")),
