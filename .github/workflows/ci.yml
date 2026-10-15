@@ -168,7 +168,7 @@ jobs:
   # Стенд целиком (docker-compose.yml: Kafka + Postgres + Rust-симулятор + Rust-шлюз, образы из исходников)
   # и сбои, которые бывают на объекте: пропал брокер, БД, ПЛК. См. scripts/stack_smoke.sh.
   stack:
-    name: Stack smoke (${{ matrix.mode }}: docker compose + сбои Kafka, БД, ПЛК)
+    name: "Stack smoke (${{ matrix.mode }}, docker compose + сбои Kafka, БД, ПЛК)"
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
