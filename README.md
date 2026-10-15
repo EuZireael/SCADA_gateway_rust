@@ -54,6 +54,9 @@ flowchart LR
 
 ```bash
 docker compose up -d --build         # первый раз соберёт образы
+# или явно выбрать, как шлюз читает станцию (одна и та же станция, 2647 каналов):
+#   scripts/stand.sh opcua        # все каналы по OPC UA
+#   scripts/stand.sh easydriver   # все каналы по PAC — протоколу драйвера старой SCADA (EasyDriver)
 curl localhost:8888/actuator/health  # {"status":"UP","components":{"db":…,"kafka":…,"controllers":{…}}}
 docker compose logs -f gateway       # журнал шлюза
 docker compose down                  # остановить (данные БД сохранятся; -v — стереть)
@@ -142,7 +145,7 @@ flowchart LR
 | `GATEWAY_API_TOKEN` | — | токен `/api/*`; без него REST открыт |
 | `GATEWAY_PUBLISH_FULL_RESEND_MS` | `30000` | полная отправка неизменившихся значений |
 | `GATEWAY_HA_ENABLED` | `false` | горячее резервирование |
-| `GATEWAY_COMMANDS_VERIFY_MS` | `0` | проверка эффекта записи OPC UA |
+| `GATEWAY_COMMANDS_VERIFY_MS` | `0` | проверка эффекта записи (OPC UA и PAC) |
 | `GATEWAY_PERSIST_TELEMETRY` | `false` | история значений в БД |
 | `SERVER_PORT` | `8888` | HTTP |
 
@@ -271,6 +274,7 @@ docker-compose.yml        стенд целиком;  docker-compose.moika.yml �
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | все переменные окружения, `controllers.yaml`, `scripts.yaml`, проверки при запуске |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | запуск, здоровье, метрики, поведение при сбоях, чек-лист безопасности |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | симптом → причина → что делать |
+| [`docs/PROTOCOL_COMPARISON.md`](docs/PROTOCOL_COMPARISON.md) | **EasyDriver (PAC) или OPC UA**: один и тот же стенд в двух режимах, замеры на настоящей прошивке, безопасность, выводы «что лучше и с чем работать» |
 | [`docs/STRESS_TEST.md`](docs/STRESS_TEST.md) | стресс-тест: до миллиона значений тегов в секунду на одном экземпляре, методика, результаты, ограничения |
 | [`docs/PILOT_CHECKLIST.md`](docs/PILOT_CHECKLIST.md) | пробный запуск на реальном оборудовании: ступени от «только чтение» до монитора, критерии, когда остановиться |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | сборка, тесты, CI, соглашения, как расширять, релиз |

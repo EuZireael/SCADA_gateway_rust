@@ -30,3 +30,10 @@ curl -s localhost:8888/actuator/prometheus | grep -E 'scada_(telemetry|poll|proc
 по ступеням — от одной станции (2 647 тегов) до 200 контроллеров × 5 000 тегов (1 000 000 тегов, опрос раз в секунду) — и
 замеряет скорость обработки, нагрузку на процессор и память, пропущенные циклы и доставку в Kafka. Методика, результаты и
 ограничения — `docs/STRESS_TEST.md`.
+
+**По PAC («EasyDriver»).** `PROTOCOL=pac scripts/stress_test.sh` — те же тег и ступени, но «контроллеры» loadsim говорят на протоколе
+driver-master (`loadsim run --protocol pac`, `loadsim config --protocol pac`). Предел протокола — 64 КБ сжатого снимка на контроллер:
+`loadsim pac-size <полей>` печатает размер. Сравнение с OPC UA — `docs/PROTOCOL_COMPARISON.md`.
+
+`scripts/compare_protocols.py --source firmware|sim` — сравнение двух режимов на одной станции (охват, точность значений, нагрузка шлюза и ПЛК,
+несколько шлюзов, запись, обрыв связи).

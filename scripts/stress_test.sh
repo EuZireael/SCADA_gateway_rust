@@ -3,7 +3,8 @@
 # Стресс-тест шлюза по ступеням: сколько значений тегов в секунду шлюз опрашивает по OPC UA, обрабатывает и
 # отдаёт в Kafka, и чего это стоит (процессор, память, пропущенные циклы).
 #
-# Источник — loadtest/loadsim: сотни OPC UA-серверов («контроллеров»), по несколько тысяч узлов, часть узлов
+# Источник — loadtest/loadsim: сотни OPC UA-серверов («контроллеров») или, с PROTOCOL=pac, PAC-серверов на протоколе
+# драйвера старой SCADA («EasyDriver»), по несколько тысяч узлов, часть узлов
 # меняется каждую секунду. Шлюз — настоящий release-процесс (публикация «по исключению», как на объекте),
 # Kafka — настоящая, в Docker (одна нода, один раздел топика, как в контракте). БД выключена (DB_ENABLED=false).
 #
@@ -11,7 +12,8 @@
 # каждое снятое значение либо уходит в Kafka, либо подавляется как повтор — в обоих случаях оно прошло весь путь
 # опрос → фильтр → скрипты. Сообщений в Kafka — Δ sent; доставлено — по конечному смещению раздела.
 #
-#   scripts/stress_test.sh                    # все ступени по умолчанию (≈ 12 минут)
+#   scripts/stress_test.sh                    # все ступени по умолчанию (≈ 12 минут), OPC UA
+#   PROTOCOL=pac scripts/stress_test.sh       # то же по PAC (EasyDriver): те же теги и ступени
 #   STAGES="r500k 100 5000 1000 0.333 4" scripts/stress_test.sh      # одна ступень
 #   WARMUP=30 MEASURE=60 OUT=/tmp/stress scripts/stress_test.sh
 #
@@ -26,7 +28,8 @@ MEASURE=${MEASURE:-60}
 PORT=${GATEWAY_PORT:-8899}
 BASE_PORT=${BASE_PORT:-4900}
 KAFKA_HEAP=${KAFKA_HEAP:-2g}
-OUT=${OUT:-loadtest/results/$(date +%Y-%m-%d)}
+PROTOCOL=${PROTOCOL:-opcua}   # opcua | pac
+OUT=${OUT:-loadtest/results/$(date +%Y-%m-%d)-$PROTOCOL}
 KAFKA=scada-stress-kafka
 TOPIC_PREFIX=stress
 DEFAULT_STAGES='
@@ -110,13 +113,13 @@ run_stage() {
   local total=$((servers * tags)) per_proc=$(( (servers + procs - 1) / procs ))
   local expected=$((total * 1000 / poll))
   local topic="$TOPIC_PREFIX.$label"
-  log "Ступень $label: $servers контроллеров × $tags тегов = $total тегов, опрос $poll мс → ожидается $expected значений/с"
+  log "[$PROTOCOL] Ступень $label: $servers контроллеров × $tags тегов = $total тегов, опрос $poll мс → ожидается $expected значений/с"
 
-  "$LOADSIM_BIN" config --servers "$servers" --tags "$tags" --base-port "$BASE_PORT" --poll-ms "$poll" > "$WORK/stage.yaml"
+  "$LOADSIM_BIN" config --protocol "$PROTOCOL" --servers "$servers" --tags "$tags" --base-port "$BASE_PORT" --poll-ms "$poll" > "$WORK/stage.yaml"
   local first=0
   while [ "$first" -lt "$servers" ]; do
     local n=$per_proc; [ $((first + n)) -le "$servers" ] || n=$((servers - first))
-    "$LOADSIM_BIN" run --servers "$n" --first "$first" --tags "$tags" --base-port "$BASE_PORT" \
+    "$LOADSIM_BIN" run --protocol "$PROTOCOL" --servers "$n" --first "$first" --tags "$tags" --base-port "$BASE_PORT" \
       --fraction "$fraction" --period-ms 1000 > "$WORK/loadsim-$first.log" 2>&1 &
     PIDS+=($!); LOADSIM_PIDS+=($!)
     first=$((first + n))

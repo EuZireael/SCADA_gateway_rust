@@ -2,13 +2,14 @@
 name = "loadsim"
 version = "0.1.0"
 edition = "2024"
-description = "Нагрузочный источник для шлюза: N OPC UA-серверов по M узлов, часть узлов меняется каждую секунду"
+description = "Нагрузочный источник для шлюза: N OPC UA- или PAC-серверов по M узлов, часть узлов меняется каждую секунду"
 
 # Отдельный пакет: не входит в сборку шлюза и образа.
 [workspace]
 
 [dependencies]
 anyhow = "1"
+flate2 = "1"
 async-opcua = { version = "0.19.0", features = ["server"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

@@ -4,7 +4,7 @@
 памяти. Замер 15.10.2026, версия 0.4.0 + исправление очереди продюсера (см. «Что нашёл тест»). Повторяется одной командой:
 
 ```bash
-scripts/stress_test.sh                 # все ступени, ≈ 20 минут, результаты в loadtest/results/<дата>/results.json
+scripts/stress_test.sh                 # все ступени, ≈ 20 минут, результаты в loadtest/results/<дата>-<протокол>/results.json
 STAGES="r500k 100 5000 1000 0.333 4" scripts/stress_test.sh      # одна ступень
 ```
 

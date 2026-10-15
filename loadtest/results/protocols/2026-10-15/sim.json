@@ -1,0 +1,496 @@
+{
+  "source": "sim",
+  "date": "2026-10-15",
+  "modes": [
+    "easydriver",
+    "opcua"
+  ],
+  "coverage": {
+    "easydriver": {
+      "enabled_channels": 1834,
+      "published": 1834,
+      "good": 1834,
+      "bad": 0,
+      "link_up_s": 0.5,
+      "first_to_last_good_ms": 2,
+      "bad_examples": []
+    },
+    "opcua": {
+      "enabled_channels": 1834,
+      "published": 1834,
+      "good": 1834,
+      "bad": 0,
+      "link_up_s": 0.5,
+      "first_to_last_good_ms": 1,
+      "bad_examples": []
+    },
+    "fidelity": {
+      "compared": 1834,
+      "equal": 1833,
+      "different": 1,
+      "only_easydriver": 0,
+      "only_opcua": 0,
+      "different_examples": [
+        {
+          "tag": "Барановичи-1.BN1_MCA1.LINE1.FQT1.V",
+          "easydriver": 12027.7,
+          "opcua": 12025.594
+        }
+      ]
+    }
+  },
+  "load": {
+    "easydriver@1000ms": {
+      "window_s": 60.0,
+      "gateway_cores": 0.017,
+      "gateway_rss_mb": 23,
+      "source_cores": {
+        "plc": 0.006
+      },
+      "values_per_s": 1834,
+      "kafka_per_s": 70.7,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 13.12,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.22,
+      "process_p99_ms": 0
+    },
+    "easydriver@100ms": {
+      "window_s": 60.0,
+      "gateway_cores": 0.098,
+      "gateway_rss_mb": 23,
+      "source_cores": {
+        "plc": 0.045
+      },
+      "values_per_s": 18339,
+      "kafka_per_s": 79.7,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 13.25,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.13,
+      "process_p99_ms": 0
+    },
+    "opcua@1000ms": {
+      "window_s": 60.0,
+      "gateway_cores": 0.011,
+      "gateway_rss_mb": 25,
+      "source_cores": {
+        "plc": 0.005
+      },
+      "values_per_s": 1834,
+      "kafka_per_s": 72.2,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 6.41,
+      "cycle_p99_ms": 10,
+      "process_mean_ms": 0.23,
+      "process_p99_ms": 0
+    },
+    "opcua@100ms": {
+      "window_s": 60.0,
+      "gateway_cores": 0.037,
+      "gateway_rss_mb": 25,
+      "source_cores": {
+        "plc": 0.037
+      },
+      "values_per_s": 18339,
+      "kafka_per_s": 82.2,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 6.46,
+      "cycle_p99_ms": 10,
+      "process_mean_ms": 0.15,
+      "process_p99_ms": 0
+    }
+  },
+  "writes": {
+    "easydriver": {
+      "effective": [
+        {
+          "status": "APPLIED",
+          "result_ms": 869,
+          "effect_ms": 337
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 844,
+          "effect_ms": 1000
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 847,
+          "effect_ms": 584
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 847,
+          "effect_ms": 290
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 843,
+          "effect_ms": 990
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 846,
+          "effect_ms": 545
+        }
+      ],
+      "ignored": [
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 843,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 857,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 847,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 846,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 837,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 854,
+          "effect_ms": null
+        }
+      ]
+    },
+    "opcua": {
+      "effective": [
+        {
+          "status": "APPLIED",
+          "result_ms": 835,
+          "effect_ms": 295
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 842,
+          "effect_ms": 947
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 833,
+          "effect_ms": 564
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 838,
+          "effect_ms": 292
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 844,
+          "effect_ms": 1038
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 840,
+          "effect_ms": 555
+        }
+      ],
+      "ignored": [
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 33,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 33,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 37,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 39,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 38,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 44,
+          "effect_ms": null
+        }
+      ]
+    }
+  },
+  "writes_fast": {
+    "easydriver": {
+      "effective": [
+        {
+          "status": "APPLIED",
+          "result_ms": 846,
+          "effect_ms": 66
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 844,
+          "effect_ms": 49
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 845,
+          "effect_ms": 95
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 845,
+          "effect_ms": 135
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 846,
+          "effect_ms": 61
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 838,
+          "effect_ms": 72
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 836,
+          "effect_ms": 119
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 849,
+          "effect_ms": 140
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 845,
+          "effect_ms": 88
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 840,
+          "effect_ms": 104
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 837,
+          "effect_ms": 127
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 849,
+          "effect_ms": 55
+        }
+      ],
+      "ignored": [
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 854,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 843,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 850,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 850,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 839,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 842,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 846,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 843,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 836,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 838,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 845,
+          "effect_ms": null
+        },
+        {
+          "status": "FAILED_NOT_APPLIED",
+          "result_ms": 838,
+          "effect_ms": null
+        }
+      ]
+    },
+    "opcua": {
+      "effective": [
+        {
+          "status": "APPLIED",
+          "result_ms": 838,
+          "effect_ms": 122
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 832,
+          "effect_ms": 93
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 841,
+          "effect_ms": 141
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 837,
+          "effect_ms": 85
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 837,
+          "effect_ms": 61
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 847,
+          "effect_ms": 66
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 839,
+          "effect_ms": 129
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 839,
+          "effect_ms": 136
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 840,
+          "effect_ms": 76
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 834,
+          "effect_ms": 79
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 842,
+          "effect_ms": 96
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 847,
+          "effect_ms": 143
+        }
+      ],
+      "ignored": [
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 38,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 36,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 32,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 36,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 45,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 29,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 38,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 37,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 33,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 37,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 30,
+          "effect_ms": null
+        },
+        {
+          "status": "REJECTED_NOT_WRITABLE",
+          "result_ms": 31,
+          "effect_ms": null
+        }
+      ]
+    }
+  }
+}
