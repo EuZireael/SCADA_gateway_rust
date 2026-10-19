@@ -40,6 +40,9 @@ pub struct ControllerHandle {
     pub opc: Mutex<Option<Arc<OpcConnection>>>,
     /// Соединение PAC: команда идёт по тому же каналу, что и опрос (как у драйвера).
     pub pac: tokio::sync::Mutex<Option<PacConnection>>,
+    /// «Опроси сейчас» после удачной записи (см. GatewaySettings::poll_after_write). Notify хранит
+    /// одно разрешение: пачка записей между опросами даёт один внеочередной опрос, а не по одному на каждую.
+    poll_now: tokio::sync::Notify,
 }
 
 impl ControllerHandle {
@@ -52,7 +55,21 @@ impl ControllerHandle {
             error_streak: AtomicU32::new(0),
             opc: Mutex::new(None),
             pac: tokio::sync::Mutex::new(None),
+            poll_now: tokio::sync::Notify::new(),
         }
+    }
+
+    /// Попросить цикл опроса прочитать контроллер вне расписания.
+    pub fn request_poll(&self) {
+        self.poll_now.notify_one();
+    }
+
+    /// Дождаться просьбы о внеочередном опросе и выдержать `delay`. Для выключенной функции
+    /// (`None`) не завершается никогда — цикл живёт по своему таймеру.
+    pub async fn poll_requested(&self, delay: Option<Duration>) {
+        let Some(delay) = delay else { return std::future::pending().await };
+        self.poll_now.notified().await;
+        tokio::time::sleep(delay).await;
     }
 
     /// Связь потеряна (не «ещё не устанавливалась»).
@@ -242,5 +259,37 @@ impl App {
     fn update_connected_gauge(&self) {
         let up = self.controllers.iter().filter(|c| c.is_connected()).count();
         self.metrics.controllers_connected.set(up as i64);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ControllerKind;
+
+    fn handle() -> ControllerHandle {
+        ControllerHandle::new(Controller {
+            id: 0,
+            name: "T".into(),
+            endpoint: "pac://127.0.0.1:1".into(),
+            kind: ControllerKind::Pac,
+            enabled: true,
+            tags: Vec::new(),
+            opc_security: Default::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn write_triggers_one_early_poll_and_disabled_never_fires() {
+        let h = handle();
+        // Две записи до опроса — одно разрешение: первый вызов проходит, второй ждёт новой записи.
+        h.request_poll();
+        h.request_poll();
+        let wait = Some(Duration::from_millis(10));
+        assert!(tokio::time::timeout(Duration::from_secs(1), h.poll_requested(wait)).await.is_ok());
+        assert!(tokio::time::timeout(Duration::from_millis(100), h.poll_requested(wait)).await.is_err());
+        // Выключено — цикл живёт только по таймеру, даже если запись была.
+        h.request_poll();
+        assert!(tokio::time::timeout(Duration::from_millis(100), h.poll_requested(None)).await.is_err());
     }
 }
