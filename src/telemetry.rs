@@ -757,7 +757,7 @@ mod processor_tests {
         kafka.delivery().record_failure(1_000);
         r.cycle(6, &rows);
         assert!(r.sent().is_empty(), "пока доставка не восстановилась — ничего нового");
-        kafka.delivery().record_success();
+        kafka.delivery().record_success(1_000_000);
         r.cycle(8, &rows);
         assert_eq!(r.sent().len(), 2, "доставка восстановилась — значения всех тегов уходят заново");
         r.cycle(10, &rows);
