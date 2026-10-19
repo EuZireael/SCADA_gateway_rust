@@ -25,6 +25,8 @@ pub struct Metrics {
     pub script_errors: IntCounterVec,
     /// Сколько каналов сейчас со скриптами.
     pub scripts_bound_tags: IntGauge,
+    /// Сколько тегов сейчас с настройками из топика `channel.tag-settings` (период опроса, зона истории).
+    pub tag_settings_tags: IntGauge,
     ha_active: IntGaugeVec,
     /// Команды по исходу (`status`).
     pub commands: IntCounterVec,
@@ -118,6 +120,7 @@ impl Metrics {
             poll_overruns: counter("scada_poll_overruns_total", "Циклы опроса, не уложившиеся в период"),
             script_errors,
             scripts_bound_tags: gauge("scada_scripts_bound_tags", "Каналов с пользовательскими скриптами"),
+            tag_settings_tags: gauge("scada_tag_settings_tags", "Тегов с настройками из топика channel.tag-settings"),
             ha_active,
             commands,
             controllers_connected: gauge("scada_controllers_connected", "Контроллеров на связи"),

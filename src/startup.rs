@@ -23,6 +23,7 @@ use crate::leadership::Leadership;
 use crate::metrics::Metrics;
 use crate::model::Controller;
 use crate::supervisor::supervise;
+use crate::tag_settings::{self, TagSettingsStore};
 use crate::{http, poller};
 
 /// Сколько ждём остановки задач после сигнала.
@@ -209,6 +210,19 @@ pub fn spawn_commands(app: &Arc<App>, leadership: &Arc<Leadership>, tasks: &mut 
                 async move { command::handle(&app, &dedup, cmd, record_ts).await }
             },
         )
+    });
+}
+
+/// Настройки тегов из топика `channel.tag-settings` (если Kafka и настройки включены): период опроса и зона истории на лету.
+pub fn spawn_tag_settings(app: &Arc<App>, tasks: &mut Tasks) {
+    let kafka = &app.settings.kafka;
+    if app.kafka.is_none() || !kafka.tag_settings_enabled {
+        return;
+    }
+    let store = Arc::new(TagSettingsStore::new(&app.controllers, app.metrics.tag_settings_tags.clone()));
+    let (app, cancel) = (app.clone(), tasks.cancel.clone());
+    tasks.supervise("настройки тегов", move || {
+        tag_settings::consume(app.settings.kafka.clone(), store.clone(), cancel.clone())
     });
 }
 

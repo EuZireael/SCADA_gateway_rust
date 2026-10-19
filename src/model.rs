@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Serialize, Serializer};
 
 use crate::config::{HistoryConfig, ServerConfig, TagConfig};
+use crate::tag_settings::TagTuning;
 
 /// Протокол, по которому тег читается и пишется.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +101,8 @@ pub struct Tag {
     pub modbus_unit_id: u8,
     /// Переопределение фильтра истории (`history:` в controllers.yaml); пусто — умолчания.
     pub history: HistoryConfig,
+    /// Настройки из топика `channel.tag-settings` (период опроса, зона истории); меняются на лету, пусто — YAML.
+    pub tuning: Arc<TagTuning>,
 }
 
 impl Tag {
@@ -128,6 +131,7 @@ impl Tag {
             modbus_type: cfg.modbus_type.clone(),
             modbus_unit_id: cfg.modbus_unit_id.unwrap_or(1),
             history: cfg.history.clone().unwrap_or_default(),
+            tuning: Arc::default(),
         }
     }
 }
