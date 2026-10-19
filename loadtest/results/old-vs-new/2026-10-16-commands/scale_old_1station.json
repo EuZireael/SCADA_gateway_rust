@@ -1,0 +1,14 @@
+{
+ "1": {
+  "stations": 1,
+  "channels": 2741,
+  "link_up_s": 5.0,
+  "easyserver_cores": 1.7,
+  "easyserver_rss_mb": 140,
+  "sim_cores": 0.015,
+  "state_requests_per_s": 4.4,
+  "values_per_s": 12129,
+  "tags_not_found": 0,
+  "window_s": 40
+ }
+}

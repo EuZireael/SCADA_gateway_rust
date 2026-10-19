@@ -1,0 +1,40 @@
+{
+  "consumer": "EasyServer (Wine 11.19) + PAC_easy_drv_LZ.dll",
+  "controller": "sim",
+  "cold": {
+    "link_up_s": 4.4,
+    "tags_not_found": 0,
+    "driver_poll_ms": 210,
+    "driver_timeout_ms": 1500,
+    "pac_name_mismatch": false
+  },
+  "load": {
+    "consumer_cores": 1.74,
+    "easyserver_cores": 1.73,
+    "wineserver_cores": 0.01,
+    "consumer_rss_mb": 140.1,
+    "plc_cores": 0.014,
+    "connections_to_plc": 1,
+    "window_s": 5
+  },
+  "recovery": [
+    {
+      "detected_s": 2.4,
+      "recovered_s": 1.8,
+      "plc_ready_s": 0.0,
+      "recovered_after_plc_ready_s": 1.8
+    },
+    {
+      "detected_s": 2.3,
+      "recovered_s": 1.7,
+      "plc_ready_s": 0.1,
+      "recovered_after_plc_ready_s": 1.7
+    },
+    {
+      "detected_s": 2.4,
+      "recovered_s": 1.9,
+      "plc_ready_s": 0.0,
+      "recovered_after_plc_ready_s": 1.85
+    }
+  ]
+}

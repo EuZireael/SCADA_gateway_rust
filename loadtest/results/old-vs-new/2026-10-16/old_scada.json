@@ -1,0 +1,41 @@
+{
+  "consumer": "EasyServer (Wine 11.19) + PAC_easy_drv_LZ.dll",
+  "controller": "ptusa-tanks",
+  "cold": {
+    "link_up_s": 4.6,
+    "tags_not_found": 17,
+    "driver_poll_ms": 210,
+    "driver_timeout_ms": 1500,
+    "pac_name_mismatch": false,
+    "channels_in_base": 2741
+  },
+  "load": {
+    "consumer_cores": 1.743,
+    "easyserver_cores": 1.737,
+    "wineserver_cores": 0.006,
+    "consumer_rss_mb": 144.5,
+    "plc_cores": 0.074,
+    "connections_to_plc": 2,
+    "window_s": 60
+  },
+  "recovery": [
+    {
+      "detected_s": 2.4,
+      "recovered_s": 1.9,
+      "plc_ready_s": 0.6,
+      "recovered_after_plc_ready_s": 1.27
+    },
+    {
+      "detected_s": 2.5,
+      "recovered_s": 1.8,
+      "plc_ready_s": 0.7,
+      "recovered_after_plc_ready_s": 1.07
+    },
+    {
+      "detected_s": 2.4,
+      "recovered_s": 1.8,
+      "plc_ready_s": 0.8,
+      "recovered_after_plc_ready_s": 1.07
+    }
+  ]
+}

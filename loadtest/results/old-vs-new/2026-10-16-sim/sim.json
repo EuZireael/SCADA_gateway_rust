@@ -1,0 +1,102 @@
+{
+  "source": "sim",
+  "date": "2026-10-16",
+  "modes": [
+    "easydriver",
+    "opcua"
+  ],
+  "coverage": {
+    "easydriver": {
+      "enabled_channels": 2658,
+      "published": 2658,
+      "good": 2658,
+      "bad": 0,
+      "link_up_s": 0.5,
+      "first_to_last_good_ms": 2,
+      "bad_examples": []
+    },
+    "opcua": {
+      "enabled_channels": 2658,
+      "published": 2658,
+      "good": 2658,
+      "bad": 0,
+      "link_up_s": 0.5,
+      "first_to_last_good_ms": 4,
+      "bad_examples": []
+    },
+    "fidelity": {
+      "compared": 2658,
+      "equal": 2658,
+      "different": 0,
+      "only_easydriver": 0,
+      "only_opcua": 0,
+      "different_examples": []
+    }
+  },
+  "load": {
+    "easydriver@1000ms": {
+      "window_s": 60.0,
+      "gateway_cores": 0.021,
+      "gateway_rss_mb": 24,
+      "source_cores": {
+        "plc": 0.005
+      },
+      "values_per_s": 2658,
+      "kafka_per_s": 88.6,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 16.01,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.31,
+      "process_p99_ms": 1
+    },
+    "easydriver@100ms": {
+      "window_s": 60.0,
+      "gateway_cores": 0.126,
+      "gateway_rss_mb": 24,
+      "source_cores": {
+        "plc": 0.036
+      },
+      "values_per_s": 26579,
+      "kafka_per_s": 88.3,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 15.26,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.19,
+      "process_p99_ms": 0
+    },
+    "opcua@1000ms": {
+      "window_s": 60.0,
+      "gateway_cores": 0.013,
+      "gateway_rss_mb": 26,
+      "source_cores": {
+        "plc": 0.007
+      },
+      "values_per_s": 2658,
+      "kafka_per_s": 87.1,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 9.49,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.31,
+      "process_p99_ms": 1
+    },
+    "opcua@100ms": {
+      "window_s": 60.0,
+      "gateway_cores": 0.047,
+      "gateway_rss_mb": 27,
+      "source_cores": {
+        "plc": 0.05
+      },
+      "values_per_s": 26579,
+      "kafka_per_s": 88.6,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 8.88,
+      "cycle_p99_ms": 10,
+      "process_mean_ms": 0.2,
+      "process_p99_ms": 0
+    }
+  }
+}

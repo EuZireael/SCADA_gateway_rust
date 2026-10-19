@@ -1,0 +1,12 @@
+{
+ "first_minute": {
+  "cores": 0.0167,
+  "kafka_msgs_per_s": 93.5,
+  "log_bytes_per_s": 1676.8
+ },
+ "after_a_minute": {
+  "cores": 0.01,
+  "kafka_msgs_per_s": 94.7,
+  "log_bytes_per_s": 180.4
+ }
+}

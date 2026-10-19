@@ -1,0 +1,66 @@
+{
+ "channel": "OBJECT2.S_PAR_F[ 1 ]",
+ "driver": "PAC_easy_drv_LZ.dll",
+ "rows": [
+  {
+   "rc": 0,
+   "set_return_ms": 3.4,
+   "effect_ms": 54.9
+  },
+  {
+   "rc": 0,
+   "set_return_ms": 0.8,
+   "effect_ms": 100.7
+  },
+  {
+   "rc": 0,
+   "set_return_ms": 0.9,
+   "effect_ms": 89.4
+  },
+  {
+   "rc": 0,
+   "set_return_ms": 0.9,
+   "effect_ms": 98.0
+  },
+  {
+   "rc": 0,
+   "set_return_ms": 0.8,
+   "effect_ms": 100.6
+  },
+  {
+   "rc": 0,
+   "set_return_ms": 0.8,
+   "effect_ms": 99.8
+  },
+  {
+   "rc": 0,
+   "set_return_ms": 0.7,
+   "effect_ms": 100.4
+  },
+  {
+   "rc": 0,
+   "set_return_ms": 0.7,
+   "effect_ms": 100.1
+  },
+  {
+   "rc": 0,
+   "set_return_ms": 0.8,
+   "effect_ms": 101.0
+  },
+  {
+   "rc": 0,
+   "set_return_ms": 0.9,
+   "effect_ms": 100.9
+  },
+  {
+   "rc": 0,
+   "set_return_ms": 0.9,
+   "effect_ms": 100.1
+  },
+  {
+   "rc": 0,
+   "set_return_ms": 0.9,
+   "effect_ms": 99.7
+  }
+ ]
+}

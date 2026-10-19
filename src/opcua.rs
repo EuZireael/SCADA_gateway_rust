@@ -247,9 +247,13 @@ impl OpcConnection {
         statuses.into_iter().next().context("сервер не вернул статус записи")
     }
 
-    /// Закрыть сессию (с таймаутом) и остановить её цикл событий.
+    /// Закрыть сессию (с таймаутом) и остановить её цикл событий. Если цикл событий уже завершился (сервер пропал,
+    /// транспорт закрыт), закрывать нечего: `disconnect` ждал бы ответа от мёртвого соединения до конца таймаута
+    /// операции (по умолчанию 5 с), и новое подключение откладывалось бы на это время после возврата контроллера.
     pub async fn close(&self) {
-        let _ = timeout(self.op_timeout, self.session.disconnect()).await;
+        if self.is_alive() {
+            let _ = timeout(self.op_timeout, self.session.disconnect()).await;
+        }
         self.event_loop.abort();
     }
 }

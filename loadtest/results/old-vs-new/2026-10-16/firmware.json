@@ -1,0 +1,197 @@
+{
+  "source": "firmware",
+  "date": "2026-10-16",
+  "modes": [
+    "easydriver",
+    "opcua"
+  ],
+  "coverage": {
+    "easydriver": {
+      "enabled_channels": 2658,
+      "published": 2658,
+      "good": 2499,
+      "bad": 159,
+      "link_up_s": 1.0,
+      "first_to_last_good_ms": 3,
+      "bad_examples": [
+        "Барановичи-1.BN1_NORM_TANKS.GR1.LINE_IN.IDLE_STEPS1[ 1 ]",
+        "Барановичи-1.BN1_NORM_TANKS.GR1.LINE_IN.IDLE_STEPS2[ 1 ]",
+        "Барановичи-1.BN1_NORM_TANKS.GR1.LINE_IN.PAUSE_STEPS1[ 1 ]",
+        "Барановичи-1.BN1_NORM_TANKS.GR1.LINE_IN.PAUSE_STEPS2[ 3 ]",
+        "Барановичи-1.BN1_NORM_TANKS.GR1.LINE_IN.RUN_STEPS2[ 11 ]",
+        "Барановичи-1.BN1_NORM_TANKS.GR1.QT1.P_CZ",
+        "Барановичи-1.BN1_NORM_TANKS.GR9.LINE_IN.IDLE_STEPS1[ 1 ]",
+        "Барановичи-1.BN1_NORM_TANKS.GR9.LINE_IN.IDLE_STEPS2[ 1 ]"
+      ]
+    },
+    "opcua": {
+      "enabled_channels": 2658,
+      "published": 2658,
+      "good": 2499,
+      "bad": 159,
+      "link_up_s": 0.5,
+      "first_to_last_good_ms": 2,
+      "bad_examples": [
+        "Барановичи-1.BN1_NORM_TANKS.GR1.LINE_IN.IDLE_STEPS1[ 1 ]",
+        "Барановичи-1.BN1_NORM_TANKS.GR1.LINE_IN.IDLE_STEPS2[ 1 ]",
+        "Барановичи-1.BN1_NORM_TANKS.GR1.LINE_IN.PAUSE_STEPS1[ 1 ]",
+        "Барановичи-1.BN1_NORM_TANKS.GR1.LINE_IN.PAUSE_STEPS2[ 3 ]",
+        "Барановичи-1.BN1_NORM_TANKS.GR1.LINE_IN.RUN_STEPS2[ 11 ]",
+        "Барановичи-1.BN1_NORM_TANKS.GR1.QT1.P_CZ",
+        "Барановичи-1.BN1_NORM_TANKS.GR9.LINE_IN.IDLE_STEPS1[ 1 ]",
+        "Барановичи-1.BN1_NORM_TANKS.GR9.LINE_IN.IDLE_STEPS2[ 1 ]"
+      ]
+    },
+    "fidelity": {
+      "compared": 2499,
+      "equal": 2474,
+      "different": 25,
+      "only_easydriver": 0,
+      "only_opcua": 0,
+      "different_examples": [
+        {
+          "tag": "Барановичи-1.BN1_NORM_TANKS.BOTTLERY1.DO1.ST",
+          "easydriver": 0,
+          "opcua": 1
+        },
+        {
+          "tag": "Барановичи-1.BN1_NORM_TANKS.DISSOLUTION1.DO1.ST",
+          "easydriver": 0,
+          "opcua": 1
+        },
+        {
+          "tag": "Барановичи-1.BN1_NORM_TANKS.GR1.LINE_IN.S_PAR_F[ 1 ]",
+          "easydriver": 3605.0,
+          "opcua": 6340.0
+        },
+        {
+          "tag": "Барановичи-1.BN1_NORM_TANKS.GR9.LINE_IN.S_PAR_F[ 1 ]",
+          "easydriver": 3604.0,
+          "opcua": 6340.0
+        },
+        {
+          "tag": "Барановичи-1.BN1_NORM_TANKS.GRB_APP1.DO1.ST",
+          "easydriver": 0,
+          "opcua": 1
+        },
+        {
+          "tag": "Барановичи-1.BN1_NORM_TANKS.M15.LINE_OUT.S_PAR_F[ 1 ]",
+          "easydriver": 3603.0,
+          "opcua": 6338.0
+        },
+        {
+          "tag": "Барановичи-1.BN1_NORM_TANKS.M16.LINE_OUT.S_PAR_F[ 1 ]",
+          "easydriver": 3602.0,
+          "opcua": 6338.0
+        },
+        {
+          "tag": "Барановичи-1.BN1_NORM_TANKS.M17.LINE_OUT.S_PAR_F[ 1 ]",
+          "easydriver": 3602.0,
+          "opcua": 6337.0
+        },
+        {
+          "tag": "Барановичи-1.BN1_NORM_TANKS.M18.LINE_OUT.S_PAR_F[ 1 ]",
+          "easydriver": 3601.0,
+          "opcua": 6336.0
+        },
+        {
+          "tag": "Барановичи-1.BN1_NORM_TANKS.M19.LINE_OUT.S_PAR_F[ 1 ]",
+          "easydriver": 3600.0,
+          "opcua": 6336.0
+        },
+        {
+          "tag": "Барановичи-1.BN1_NORM_TANKS.MASTER1.MASTER.S_PAR_F[ 1 ]",
+          "easydriver": 3592.0,
+          "opcua": 6327.0
+        },
+        {
+          "tag": "Барановичи-1.BN1_NORM_TANKS.MCA4LINE1.DO21.ST",
+          "easydriver": 0,
+          "opcua": 1
+        }
+      ]
+    }
+  },
+  "load": {
+    "easydriver@1000ms": {
+      "window_s": 60.0,
+      "gateway_cores": 0.02,
+      "gateway_rss_mb": 25,
+      "source_cores": {
+        "plc": 0.092
+      },
+      "values_per_s": 2657,
+      "kafka_per_s": 106.2,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 21.07,
+      "cycle_p99_ms": 50,
+      "process_mean_ms": 0.33,
+      "process_p99_ms": 1
+    },
+    "easydriver@100ms": {
+      "window_s": 60.0,
+      "gateway_cores": 0.127,
+      "gateway_rss_mb": 23,
+      "source_cores": {
+        "plc": 0.104
+      },
+      "values_per_s": 26566,
+      "kafka_per_s": 265.6,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 21.38,
+      "cycle_p99_ms": 50,
+      "process_mean_ms": 0.24,
+      "process_p99_ms": 0
+    },
+    "opcua@1000ms": {
+      "window_s": 60.0,
+      "gateway_cores": 0.013,
+      "gateway_rss_mb": 27,
+      "source_cores": {
+        "plc": 0.094,
+        "facade": 0.031
+      },
+      "values_per_s": 2656,
+      "kafka_per_s": 107.8,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 9.44,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.34,
+      "process_p99_ms": 1
+    },
+    "opcua@100ms": {
+      "window_s": 60.0,
+      "gateway_cores": 0.048,
+      "gateway_rss_mb": 26,
+      "source_cores": {
+        "plc": 0.093,
+        "facade": 0.078
+      },
+      "values_per_s": 26612,
+      "kafka_per_s": 125.4,
+      "poll_overruns": 0,
+      "send_errors": 0,
+      "cycle_mean_ms": 9.67,
+      "cycle_p99_ms": 25,
+      "process_mean_ms": 0.22,
+      "process_p99_ms": 0
+    }
+  },
+  "recovery": {
+    "easydriver": {
+      "detected_bad_s": 0.8,
+      "bad_channels": 2505,
+      "recovered_good_s": 3.3,
+      "good_channels": 2499
+    },
+    "opcua": {
+      "detected_bad_s": 0.9,
+      "bad_channels": 2504,
+      "recovered_good_s": 3.3,
+      "good_channels": 2499
+    }
+  }
+}

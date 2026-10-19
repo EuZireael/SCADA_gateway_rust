@@ -1,0 +1,24 @@
+{
+  "source": "firmware",
+  "date": "2026-10-16",
+  "modes": [
+    "easydriver",
+    "opcua"
+  ],
+  "recovery": {
+    "easydriver": {
+      "detected_bad_s": 0.9,
+      "bad_channels": 2505,
+      "recovered_good_s": 2.7,
+      "good_channels": 2499,
+      "recovered_after_plc_ready_s": 0.43
+    },
+    "opcua": {
+      "detected_bad_s": 0.8,
+      "bad_channels": 2504,
+      "recovered_good_s": 2.5,
+      "good_channels": 2499,
+      "recovered_after_plc_ready_s": 1.35
+    }
+  }
+}

@@ -16,13 +16,14 @@ cd "$(dirname "$0")/.."
 IN="${1:-config/stations/BN1_MCA1.yaml}"
 OUT="${2:-config/stations/BN1_MCA1_easydriver.yaml}"
 
+STATION="$(basename "$IN" .yaml)"
 {
-  cat <<'HEAD'
+  cat <<HEAD
 # ============================================================================
-# Реальная станция BN1_MCA1 (Барановичи-1): один контроллер ptusa, все каналы — PAC (driver-master), то есть по
+# Реальная станция ${STATION} (Барановичи-1): один контроллер ptusa, все каналы — PAC (driver-master), то есть по
 # протоколу «EasyDriver»: тому, на котором драйвер старой SCADA (EasyServer) говорит с контроллером.
-# СГЕНЕРИРОВАНО tools/station_to_easydriver.sh из config/stations/BN1_MCA1.yaml (тот же набор каналов, те же имена,
-# типы и доступ на запись) — не править руками. Тот же набор по OPC UA — config/stations/BN1_MCA1.yaml.
+# СГЕНЕРИРОВАНО tools/station_to_easydriver.sh из config/stations/${STATION}.yaml (тот же набор каналов, те же имена,
+# типы и доступ на запись) — не править руками. Тот же набор по OPC UA — config/stations/${STATION}.yaml.
 # Адрес контроллера — env PAC_HOST, порт — PAC_PORT (10000 по умолчанию). IP объекта в репозиторий не пишется.
 # ============================================================================
 HEAD
