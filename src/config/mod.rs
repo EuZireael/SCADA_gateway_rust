@@ -47,6 +47,10 @@ pub struct KafkaSettings {
     pub client: ClientProperties,
     /// Имена топиков.
     pub topics: Topics,
+    /// Топик настроек тегов (`CHANNEL_TAG_SETTINGS_TOPIC`): его создаёт и пишет `channel`, шлюз только читает.
+    pub tag_settings_topic: String,
+    /// Применять ли настройки тегов из топика (`GATEWAY_TAG_SETTINGS_ENABLED`).
+    pub tag_settings_enabled: bool,
 }
 
 impl KafkaSettings {
@@ -240,6 +244,8 @@ impl KafkaSettings {
                     "scada-command-results",
                 ),
             },
+            tag_settings_topic: env_or(&["CHANNEL_TAG_SETTINGS_TOPIC"], "channel.tag-settings"),
+            tag_settings_enabled: env_bool(&["GATEWAY_TAG_SETTINGS_ENABLED"], true),
         })
     }
 }

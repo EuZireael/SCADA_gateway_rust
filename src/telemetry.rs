@@ -141,7 +141,10 @@ impl Processor {
 
             // 5. Локальная история — только значимые точки.
             if app.telemetry.is_some() && r.tag.id > 0 {
-                let params = FilterParams::history(&gw.history, &r.tag.history);
+                let mut params = FilterParams::history(&gw.history, &r.tag.history);
+                if let Some(deadband) = r.tag.tuning.deadband() {
+                    params.deadband = deadband; // настройка из channel.tag-settings важнее YAML
+                }
                 if filter::decide_phased(&params, &mut state.history, value, quality, now, state.phase) {
                     history_rows.push(TelemetryRow {
                         tag_id: r.tag.id,
@@ -798,6 +801,46 @@ mod processor_tests {
         r.cycle(600, &[(0, f(10.0), Good), (1, f(11.2), Good)]);
         let pulse: Vec<TelemetryRow> = std::iter::from_fn(|| r.history_rx.try_recv().ok()).flatten().collect();
         assert_eq!(pulse.iter().filter(|x| x.tag_id == 1).count(), 1);
+    }
+
+    #[test]
+    fn history_deadband_from_tag_settings_replaces_the_yaml_one() {
+        use crate::config::HistoryConfig;
+        // A — умолчания; B — зона 1.0 из блока history: тега. Настройки из channel.tag-settings: A получает зону 2.0,
+        // B — зону 0 (она заменяет 1.0 из YAML, а не складывается с ней).
+        let mut b = tag_cfg("B", "FLOAT");
+        b.history = Some(HistoryConfig { deadband: Some(1.0), ..Default::default() });
+        let mut r = rig_full(
+            |s| s.gateway.history.max_interval = Duration::from_secs(600),
+            vec![tag_cfg("A", "FLOAT"), b],
+            None,
+            false,
+        );
+        let tags = r.app.controllers[0].ctrl.tags.clone();
+        tags[0].tuning.apply(Some(&crate::tag_settings::TagSettings { deadband: 2.0, poll_period_ms: None }));
+        tags[1].tuning.apply(Some(&crate::tag_settings::TagSettings { deadband: 0.0, poll_period_ms: None }));
+        for (k, (a, b)) in [(10.0, 10.0), (11.0, 10.4), (12.5, 10.8)].into_iter().enumerate() {
+            r.cycle(k as u64 * 2, &[(0, f(a), Good), (1, f(b), Good)]);
+        }
+        let rows: Vec<TelemetryRow> = std::iter::from_fn(|| r.history_rx.try_recv().ok()).flatten().collect();
+        let of = |id: i64| rows.iter().filter(|x| x.tag_id == id).map(|x| x.value.clone()).collect::<Vec<_>>();
+        assert_eq!(of(1), [f(10.0), f(12.5)], "A: зона 2.0 — 11.0 пропущено, 12.5 записано");
+        assert_eq!(
+            of(2),
+            [f(10.0), f(10.4), f(10.8)],
+            "B: зона 0 — каждое изменение значимо, 1.0 из YAML не действует"
+        );
+        // Сняли настройки (tombstone) — вернулись к YAML: B снова с зоной 1.0.
+        tags[1].tuning.apply(None);
+        r.cycle(6, &[(0, f(12.5), Good), (1, f(11.0), Good)]);
+        r.cycle(8, &[(0, f(12.5), Good), (1, f(11.9), Good)]);
+        let rows: Vec<TelemetryRow> = std::iter::from_fn(|| r.history_rx.try_recv().ok()).flatten().collect();
+        let b_after: Vec<_> = rows.iter().filter(|x| x.tag_id == 2).map(|x| x.value.clone()).collect();
+        assert_eq!(
+            b_after,
+            [f(11.9)],
+            "B: снова зона 1.0 из YAML — от записанного 10.8 значение 11.0 мало, 11.9 значимо"
+        );
     }
 
     #[test]

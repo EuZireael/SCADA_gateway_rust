@@ -5,7 +5,7 @@
 //! пишет в БД или Kafka, ставится в очереди — цикл никогда не ждёт внешние системы.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tokio::time::{MissedTickBehavior, interval, sleep};
@@ -18,6 +18,7 @@ use crate::modbus::{self, ModbusClient};
 use crate::model::{ControllerKind, Protocol, Quality, Reading, Tag, Timestamp};
 use crate::opcua::{self, ConnectOptions, OpcConnection, ReadValueId};
 use crate::pac::{self, PacConnection};
+use crate::schedule::PollSchedule;
 use crate::telemetry::{Processor, all_bad};
 
 /// Опрос контроллера до остановки: цикл выбирается по протоколу. Запускается под надзором — выход раньше остановки считается сбоем.
@@ -167,12 +168,14 @@ enum Cycle {
     Reconnect,
 }
 
-/// Один цикл чтения узлов: обработка значений и состояние линка.
+/// Один цикл чтения узлов: обработка значений и состояние линка. Читаются только «созревшие» теги (см. `schedule.rs`):
+/// теги с настройкой «период» из `channel.tag-settings` — реже цикла.
 async fn read_opcua_cycle(
     app: &App,
     handle: &ControllerHandle,
     conn: &OpcConnection,
     processor: &mut Processor,
+    schedule: &mut PollSchedule,
     tags: &[Arc<Tag>],
     nodes: &[ReadValueId],
 ) -> Cycle {
@@ -181,10 +184,22 @@ async fn read_opcua_cycle(
         app.mark_down(handle, "сессия OPC UA закрыта");
         return Cycle::Reconnect;
     }
+    let now = Instant::now();
+    let due: Vec<usize> = (0..tags.len()).filter(|&i| schedule.take_due(&tags[i], now)).collect();
+    if due.is_empty() {
+        return Cycle::Continue; // в этом цикле читать нечего: у всех тегов период длиннее цикла
+    }
+    let full = due.len() == tags.len();
+    let subset: Option<(Vec<Arc<Tag>>, Vec<ReadValueId>)> = (!full)
+        .then(|| (due.iter().map(|&i| tags[i].clone()).collect(), due.iter().map(|&i| nodes[i].clone()).collect()));
+    let (read_tags, read_nodes): (&[Arc<Tag>], &[ReadValueId]) = match &subset {
+        Some((t, n)) => (t, n),
+        None => (tags, nodes),
+    };
     let _cycle = CycleTimer::start(app, handle);
-    match conn.read(nodes).await {
+    match conn.read(read_nodes).await {
         Ok(values) => {
-            let readings: Vec<Reading> = tags
+            let readings: Vec<Reading> = read_tags
                 .iter()
                 .zip(values.iter())
                 .map(|(tag, dv)| {
@@ -197,10 +212,11 @@ async fn read_opcua_cycle(
             if good > 0 || readings.is_empty() {
                 // Запрос прошёл и хотя бы один узел дал значение → связь есть (BAD у отдельных узлов связь не роняет).
                 app.mark_up(handle);
-            } else {
+            } else if full {
                 // Все узлы BAD — сервер жив, а данных за ним нет (пропала шина или рантайм ПЛК, у OPC UA-фасада —
                 // связь с прошивкой): значения замерли бы на мониторе при «живой» связи и без строки в журнале,
-                // поэтому это обрыв.
+                // поэтому это обрыв. Если читалась только часть тегов, вывода о связи не делаем: редкие теги могут
+                // быть все недостоверны при исправной связи.
                 let status = values.first().and_then(|dv| dv.status).map(|s| s.to_string()).unwrap_or_default();
                 app.mark_down(handle, &format!("все {} узлов вернули BAD ({status})", readings.len()));
             }
@@ -263,6 +279,7 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
     let gw = app.settings.gateway.clone();
     let (tags, nodes) = opcua_nodes(&handle);
     let mut processor = Processor::new(app.clone(), handle.clone());
+    let mut schedule = PollSchedule::new(handle.ctrl.tags.len(), Duration::from_millis(handle.ctrl.cycle_period_ms()));
     let opts = ConnectOptions::for_controller(&handle.ctrl.opc_security, &gw);
     log_opcua_security(&handle.ctrl.name, &opts);
     let mut fails: u32 = 0;
@@ -292,7 +309,9 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
                 _ = tick.tick() => {}
                 _ = handle.poll_requested(gw.poll_after_write) => {}
             }
-            if let Cycle::Reconnect = read_opcua_cycle(&app, &handle, &conn, &mut processor, &tags, &nodes).await {
+            if let Cycle::Reconnect =
+                read_opcua_cycle(&app, &handle, &conn, &mut processor, &mut schedule, &tags, &nodes).await
+            {
                 break;
             }
         }
@@ -318,6 +337,7 @@ async fn run_modbus(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancel
     let unit = tags.first().map(|t| t.modbus_unit_id).unwrap_or(1);
     let mut client = ModbusClient::new(host, port, unit, gw.modbus_op_timeout);
     let mut processor = Processor::new(app.clone(), handle.clone());
+    let mut schedule = PollSchedule::new(handle.ctrl.tags.len(), Duration::from_millis(handle.ctrl.cycle_period_ms()));
     let mut tick = ticker(&handle);
     info!("{}: Modbus — {} тегов в {} блоках FC03", handle.ctrl.name, tags.len(), blocks.len());
 
@@ -330,8 +350,11 @@ async fn run_modbus(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancel
         match client.read(&mut blocks).await {
             Ok(values) => {
                 let ts = Timestamp::now(); // у Modbus нет времени источника — момент чтения
+                // Блоки регистров читаются целиком (так дешевле), а в обработку идут только «созревшие» теги.
+                let now = Instant::now();
                 let readings: Vec<Reading> = values
                     .into_iter()
+                    .filter(|(tag, _)| schedule.take_due(tag, now))
                     .map(|(tag, value)| {
                         let quality = if value.is_some() { Quality::Good } else { Quality::Bad };
                         Reading { tag, value, quality, timestamp: ts }
@@ -356,6 +379,7 @@ async fn run_pac(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancellat
     let tags = tags_of(&handle, Protocol::Pac);
     let (host, port) = pac::endpoint(&handle.ctrl.endpoint);
     let mut processor = Processor::new(app.clone(), handle.clone());
+    let mut schedule = PollSchedule::new(handle.ctrl.tags.len(), Duration::from_millis(handle.ctrl.cycle_period_ms()));
     let mut tick = ticker(&handle);
 
     loop {
@@ -383,8 +407,11 @@ async fn run_pac(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancellat
         match conn.poll_states().await {
             Ok(()) => {
                 let ts = Timestamp::now(); // у PAC нет времени источника — момент чтения
+                // Снимок PAC приходит целиком, а в обработку идут только «созревшие» теги.
+                let now = Instant::now();
                 let readings: Vec<Reading> = tags
                     .iter()
+                    .filter(|tag| schedule.take_due(tag, now))
                     .map(|tag| {
                         let value = match (tag.device_name.as_deref(), tag.field_name.as_deref()) {
                             (Some(d), Some(f)) => conn.read_value(d, f, &tag.data_type),
