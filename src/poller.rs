@@ -222,6 +222,42 @@ async fn read_opcua_cycle(
     }
 }
 
+/// Сколько неудачных попыток подряд идут с короткой паузой, прежде чем перейти на редкие (≈ минута при паузе 0,2 с).
+const FAST_ATTEMPTS: u32 = 300;
+/// Пауза между попытками к контроллеру, который недоступен давно: журнал и сеть не засоряются многодневным простоем.
+const SLOW_PAUSE: Duration = Duration::from_secs(2);
+
+/// Пауза перед следующей попыткой подключения к OPC UA после `fails` неудач подряд: `base`
+/// (`GATEWAY_SUPERVISE_INTERVAL_MS`, по умолчанию 0,2 с) первые `FAST_ATTEMPTS` попыток, дальше не короче `SLOW_PAUSE`.
+/// Короткая пауза нужна для быстрого возврата: контроллер, вернувшийся через несколько секунд, подхватывается сразу;
+/// медленный режим — защита от шума при многодневной недоступности (каждая попытка пишет в журнал).
+fn reconnect_pause(fails: u32, base: Duration) -> Duration {
+    if fails <= FAST_ATTEMPTS { base } else { base.max(SLOW_PAUSE) }
+}
+
+/// Подключиться не удалось из-за связи (порт закрыт, обрыв, таймаут), а не потому, что сервер ответил отказом (неверный
+/// пароль, защита, лимит сессий). Отказ сервера повторять часто нельзя: каждая попытка может оставить на сервере
+/// неполностью открытую сессию, и частые попытки исчерпают лимит сессий контроллера для всех клиентов.
+fn is_link_failure(e: &anyhow::Error) -> bool {
+    let text = format!("{e:#}");
+    [
+        "BadCommunicationError",
+        "BadConnectionClosed",
+        "BadNotConnected",
+        "BadServerHalted",
+        "Connection refused",
+        "Could not connect",
+        "таймаут",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+/// Пауза после неудачной попытки подключения: короткая при потере связи, не короче `SLOW_PAUSE` при отказе сервера.
+fn pause_after_failure(e: &anyhow::Error, fails: u32, base: Duration) -> Duration {
+    if is_link_failure(e) { reconnect_pause(fails, base) } else { base.max(SLOW_PAUSE) }
+}
+
 /// Цикл OPC UA: подключение → чтение до обрыва → закрытие и пересоздание сессии; пока подключения нет — кадры BAD на каждой попытке.
 async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: CancellationToken) {
     let gw = app.settings.gateway.clone();
@@ -237,7 +273,7 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
             Err(e) => {
                 fails += 1;
                 on_connect_failed(&app, &handle, &mut processor, &tags, fails, &e);
-                if !pause(&cancel, gw.reconnect_interval).await {
+                if !pause(&cancel, pause_after_failure(&e, fails, gw.reconnect_interval)).await {
                     return;
                 }
                 continue;
@@ -262,7 +298,7 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
         handle.set_opc_connection(None);
         // Закрываем сессию явно: иначе сервер держал бы её до своего таймаута.
         conn.close().await;
-        if cancel.is_cancelled() || !pause(&cancel, Duration::from_secs(1)).await {
+        if cancel.is_cancelled() || !pause(&cancel, gw.reconnect_interval.min(Duration::from_secs(1))).await {
             return;
         }
     }
@@ -404,5 +440,43 @@ pub async fn heartbeat(app: Arc<App>, cancel: CancellationToken) {
                 json!({"uptimeSeconds": uptime, "controllers": app.controllers.len(), "tags": app.tag_count()}),
             ),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+
+    #[test]
+    fn reconnect_is_fast_at_first_and_slows_down_for_a_long_outage() {
+        let base = Duration::from_millis(200);
+        assert_eq!(reconnect_pause(1, base), base);
+        assert_eq!(reconnect_pause(FAST_ATTEMPTS, base), base);
+        assert_eq!(reconnect_pause(FAST_ATTEMPTS + 1, base), SLOW_PAUSE);
+        assert_eq!(reconnect_pause(1_000_000, base), SLOW_PAUSE);
+    }
+
+    #[test]
+    fn a_server_refusal_is_not_retried_quickly_but_a_lost_link_is() {
+        let base = Duration::from_millis(200);
+        let refused =
+            anyhow!("OPC UA opc.tcp://x:4840: соединение не установлено (Ok(BadCommunicationError (2147811328)))");
+        let denied =
+            anyhow!("OPC UA opc.tcp://x:4840: соединение не установлено (Ok(BadIdentityTokenRejected (2149253120)))");
+        let too_many =
+            anyhow!("OPC UA opc.tcp://x:4840: соединение не установлено (Ok(BadTooManySessions (2153119744)))");
+        let hung = anyhow!("OPC UA opc.tcp://x:4840: таймаут 5000 мс (handshake завис)");
+        assert_eq!(pause_after_failure(&refused, 1, base), base);
+        assert_eq!(pause_after_failure(&hung, 1, base), base);
+        assert_eq!(pause_after_failure(&denied, 1, base), SLOW_PAUSE);
+        assert_eq!(pause_after_failure(&too_many, 1, base), SLOW_PAUSE);
+    }
+
+    #[test]
+    fn a_longer_configured_pause_is_never_shortened() {
+        let ten = Duration::from_secs(10);
+        assert_eq!(reconnect_pause(1, ten), ten);
+        assert_eq!(reconnect_pause(FAST_ATTEMPTS + 1, ten), ten);
     }
 }
