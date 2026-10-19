@@ -28,6 +28,21 @@ use crate::metrics::Metrics;
 
 /// Как часто повторять предупреждение о недоставленных сообщениях (при обрыве брокера их тысячи).
 const WARN_EVERY: Duration = Duration::from_secs(30);
+/// Не чаще раза в это время восстановление доставки запускает полную отправку всех тегов: при «мигающем» брокере
+/// каждое восстановление иначе повторяло бы залп из всех тегов всех контроллеров (при 54 800 тегах — 54 800 сообщений).
+/// Недоставленное в паузе уходит с обычной полной отправкой (`GATEWAY_PUBLISH_FULL_RESEND_MS`, 30 с).
+const MIN_RESYNC_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Что произошло, когда доставка после сбоя снова пошла.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Recovery {
+    /// Сбоя не было.
+    None,
+    /// Доставка восстановилась, все теги будут отправлены заново.
+    Resync,
+    /// Доставка восстановилась, но полная отправка была совсем недавно — новой не будет.
+    Throttled,
+}
 
 /// Состояние доставки: недоставленное запоминает фильтр публикации («по исключению») как
 /// отправленное, и потребитель не узнал бы значение до полной отправки. Поэтому, как только доставка
@@ -35,8 +50,10 @@ const WARN_EVERY: Duration = Duration::from_secs(30);
 #[derive(Default)]
 pub struct DeliveryState {
     failing: AtomicBool,
-    /// Растёт при каждом восстановлении доставки после сбоя.
+    /// Растёт при восстановлении доставки после сбоя, но не чаще `MIN_RESYNC_INTERVAL`.
     resync_epoch: AtomicU64,
+    /// Момент последнего ресинка (мс от `epoch_ms`); 0 — ещё не было.
+    last_resync_ms: AtomicI64,
     /// Момент последнего предупреждения (мс от `epoch_ms`), чтобы не засорять журнал.
     last_warn_ms: AtomicI64,
     suppressed: AtomicU64,
@@ -55,16 +72,22 @@ impl DeliveryState {
         None
     }
 
-    /// Удачная доставка: true, если до неё был сбой (доставка восстановилась).
-    pub(crate) fn record_success(&self) -> bool {
-        let recovered = self.failing.swap(false, Ordering::AcqRel);
-        if recovered {
-            self.resync_epoch.fetch_add(1, Ordering::AcqRel);
+    /// Удачная доставка: было ли восстановление после сбоя и нужна ли теперь полная отправка. Флаг сбоя снимается всегда;
+    /// «эпоха» растёт, только если с прошлого ресинка прошло не меньше `MIN_RESYNC_INTERVAL`.
+    pub(crate) fn record_success(&self, now_ms: i64) -> Recovery {
+        if !self.failing.swap(false, Ordering::AcqRel) {
+            return Recovery::None;
         }
-        recovered
+        let last = self.last_resync_ms.load(Ordering::Relaxed);
+        if last != 0 && now_ms - last < MIN_RESYNC_INTERVAL.as_millis() as i64 {
+            return Recovery::Throttled;
+        }
+        self.last_resync_ms.store(now_ms, Ordering::Relaxed);
+        self.resync_epoch.fetch_add(1, Ordering::AcqRel);
+        Recovery::Resync
     }
 
-    /// «Эпоха» восстановления доставки: растёт при каждом восстановлении после сбоя; обработчики сравнивают её со своей и отправляют все теги заново.
+    /// «Эпоха» восстановления доставки: растёт при восстановлении после сбоя (не чаще раза в 30 с); обработчики сравнивают её со своей и отправляют все теги заново.
     pub fn resync_epoch(&self) -> u64 {
         self.resync_epoch.load(Ordering::Acquire)
     }
@@ -102,12 +125,17 @@ impl ProducerContext for DeliveryCounter {
                     );
                 }
             }
-            Ok(_) => {
-                if self.state.record_success() {
+            Ok(_) => match self.state.record_success(chrono::Utc::now().timestamp_millis()) {
+                Recovery::Resync => {
                     self.metrics.kafka_resyncs.inc();
                     info!("Kafka: доставка восстановлена — все теги будут отправлены заново");
                 }
-            }
+                Recovery::Throttled => info!(
+                    "Kafka: доставка восстановлена; полная отправка была меньше {} с назад — недоставленное уйдёт с ближайшей плановой",
+                    MIN_RESYNC_INTERVAL.as_secs()
+                ),
+                Recovery::None => {}
+            },
         }
     }
 }
@@ -508,15 +536,33 @@ mod tests {
     fn delivery_recovery_after_failures_bumps_the_resync_epoch_once() {
         let d = DeliveryState::default();
         assert!(d.healthy());
-        assert!(!d.record_success(), "успех без сбоя ничего не меняет");
+        assert_eq!(d.record_success(500), Recovery::None, "успех без сбоя ничего не меняет");
         assert_eq!(d.resync_epoch(), 0);
         d.record_failure(1_000);
         d.record_failure(2_000);
         assert!(!d.healthy());
-        assert!(d.record_success(), "первый успех после сбоя — восстановление");
-        assert!(!d.record_success());
+        assert_eq!(d.record_success(3_000), Recovery::Resync, "первый успех после сбоя — восстановление");
+        assert_eq!(d.record_success(3_100), Recovery::None);
         assert!(d.healthy());
         assert_eq!(d.resync_epoch(), 1);
+    }
+
+    #[test]
+    fn flapping_broker_causes_one_resync_per_interval() {
+        let d = DeliveryState::default();
+        d.record_failure(1_000);
+        assert_eq!(d.record_success(2_000), Recovery::Resync);
+        // «Мигание»: сбой и восстановление ещё дважды в пределах 30 с — флаг сбоя снят, ресинка нет.
+        d.record_failure(5_000);
+        assert_eq!(d.record_success(6_000), Recovery::Throttled);
+        assert!(d.healthy(), "флаг сбоя при этом снимается");
+        d.record_failure(20_000);
+        assert_eq!(d.record_success(21_000), Recovery::Throttled);
+        assert_eq!(d.resync_epoch(), 1);
+        // Через 30 с после прошлого ресинка — снова можно.
+        d.record_failure(31_900);
+        assert_eq!(d.record_success(32_000), Recovery::Resync);
+        assert_eq!(d.resync_epoch(), 2);
     }
 
     #[test]
