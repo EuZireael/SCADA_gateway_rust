@@ -17,6 +17,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -73,8 +74,6 @@ pub struct PacField {
 pub struct PacDevice {
     /// Имя прибора (`LINE1V0`).
     pub device: String,
-    /// Тип прибора (`V`, `M`…); по умолчанию `DEV`.
-    pub dev_type: String,
     /// Поля прибора.
     pub fields: Vec<PacField>,
 }
@@ -106,13 +105,13 @@ impl PacModel {
     pub fn handle_command(&self, cmd: u8, payload: &[u8]) -> (u8, Vec<u8>) {
         match cmd {
             CMD_GET_INFO_ON_CONNECT => (STATUS_OK, self.build_info()),
-            CMD_GET_DEVICES => (STATUS_OK, self.build_devices()),
+            CMD_GET_DEVICES => (STATUS_OK, self.build_states()),
             CMD_GET_DEVICES_STATES => (STATUS_OK, self.build_states()),
             CMD_EXEC_DEVICE_COMMAND => {
                 let applied = self.apply_command(payload.get(1..).unwrap_or_default());
                 (STATUS_OK, if applied { EXEC_APPLIED } else { EXEC_FAILED }.to_vec())
             }
-            CMD_GET_PAC_ERRORS => (STATUS_OK, b"errors={}\n".to_vec()),
+            CMD_GET_PAC_ERRORS => (STATUS_OK, b"errors={}\n\0".to_vec()),
             other => {
                 // ptusa на незнакомую команду отвечает пустым телом со статусом успеха.
                 warn!("PAC: неизвестная команда {other}");
@@ -132,26 +131,14 @@ impl PacModel {
     }
 
     /// Формат ответов devices/states: 2 байта devices_request_id (LE; конфигурация не меняется —
-    /// константа 1) + Lua-текст.
+    /// константа 1) + Lua-текст + завершающий нуль. Нуль нужен: драйвер старой SCADA (EasyDriver) разжимает ответ в
+    /// общий буфер и исполняет его как C-строку (`luaL_dostring`), а без нуля за коротким ответом читается хвост
+    /// прошлого длинного (снимок «Ошибка получения состояния объектов PAC … unfinished string»).
     fn with_request_id(lua: String) -> Vec<u8> {
         let mut out = 1u16.to_le_bytes().to_vec();
         out.extend(lua.into_bytes());
+        out.push(0);
         out
-    }
-
-    /// Объектная модель: `devices['1V1']={type='V',fields={'ST','M'}}`.
-    fn build_devices(&self) -> Vec<u8> {
-        let mut lua = String::from("devices={}\n");
-        for d in &self.devices {
-            let fields: Vec<String> = d.fields.iter().map(|f| format!("'{}'", f.field)).collect();
-            lua.push_str(&format!(
-                "devices['{}']={{type='{}',fields={{{}}}}}\n",
-                d.device,
-                d.dev_type,
-                fields.join(",")
-            ));
-        }
-        Self::with_request_id(lua)
     }
 
     /// Снимок по приборам, как device_manager::save_device у ptusa:
@@ -161,6 +148,8 @@ impl PacModel {
         let values = self.values.lock().expect("снимок");
         let array_field = array_field_re();
         let mut lua = String::from("t=\n\t{\n");
+        // Рецептурный менеджер у прошивки — массив `t.RECMAN[n]`, а не приборы с именем `RECMAN[n]`.
+        let mut recman: BTreeMap<u32, String> = BTreeMap::new();
         for d in &self.devices {
             let mut fields: Vec<String> = Vec::new();
             let mut arrays: Vec<(String, BTreeMap<u32, &Value>)> = Vec::new();
@@ -184,9 +173,22 @@ impl PacModel {
                 let inner: Vec<String> = items.iter().map(|(i, v)| format!("[{i}]={}", lua_value(v))).collect();
                 fields.push(format!("{}={{{}}}", lua_key(&name), inner.join(", ")));
             }
-            if !fields.is_empty() {
-                lua.push_str(&format!("\t{}={{{}}},\n", lua_key(&d.device), fields.join(", ")));
+            if fields.is_empty() {
+                continue;
             }
+            match recman_index(&d.device) {
+                Some(n) => {
+                    recman.insert(n, fields.join(", "));
+                }
+                None => lua.push_str(&format!("\t{}={{{}}},\n", lua_key(&d.device), fields.join(", "))),
+            }
+        }
+        if !recman.is_empty() {
+            lua.push_str("\tRECMAN={\n");
+            for (n, body) in recman {
+                lua.push_str(&format!("\t\t[{n}]={{{body}}},\n"));
+            }
+            lua.push_str("\t},\n");
         }
         lua.push_str("\t}\n");
         Self::with_request_id(lua)
@@ -213,12 +215,15 @@ fn array_field_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^(?P<name>[^\[\]]+)\[(?P<idx>\d+)\]").expect("регэксп"))
 }
 
-/// Разбор Lua-команды записи: `__1V1:set_cmd('ST', 1, 1)` или `..., 'value')`. Ведущие
-/// подчёркивания (у имён с цифры) съедаются: dev='1V1', field='ST', idx=1, val='1'.
+/// Разбор Lua-команды записи: `__1V1:set_cmd('ST', 1, 1)` или `..., 'value')`; драйвер старой SCADA (EasyDriver) пишет её в двойных
+/// кавычках и с пробелами: `__OBJECT2:set_cmd( "S_PAR_F", 1, 10 )`, а рецептурный менеджер как `__RECMAN[1]:set_cmd( "PAR", 5, 2.5 )`.
+/// Ведущие подчёркивания (у имён с цифры) съедаются: dev='1V1', field='ST', idx=1, val='1'.
 fn set_cmd_re() -> &'static Regex {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"_*(?P<dev>\w+):set_cmd\(\s*'(?P<field>\w+)'\s*,\s*(?P<idx>\d+)\s*,\s*'?(?P<val>[^')]+)'?\s*\)")
+        Regex::new(
+            r#"_*(?P<dev>\w+(?:\[\d+\])?):set_cmd\(\s*['"](?P<field>\w+)['"]\s*,\s*(?P<idx>\d+)\s*,\s*['"]?(?P<val>[^'")]+?)['"]?\s*\)"#,
+        )
             .expect("регэксп")
     })
 }
@@ -232,6 +237,11 @@ fn parse_scalar(text: &str) -> Value {
     } else {
         Value::Text(text.to_string())
     }
+}
+
+/// `RECMAN[3]` → `Some(3)`: рецептурный менеджер.
+fn recman_index(device: &str) -> Option<u32> {
+    device.strip_prefix("RECMAN[")?.strip_suffix(']')?.parse().ok()
 }
 
 /// Ключ Lua-таблицы: идентификатор как есть (LINE1V0), иначе `["1V1"]`.
@@ -297,6 +307,10 @@ fn response(pidx: u8, status: u8, body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Сколько раз клиенты запросили снимок состояния (GET_DEVICES_STATES); раз в 5 с пишется в журнал — по нему считают, сколько
+/// значений в секунду забирают у симулятора (число каналов × запросов в секунду).
+static STATE_REQUESTS: AtomicU64 = AtomicU64::new(0);
+
 /// Обслужить одно соединение драйвера: приветствие, затем кадры «запрос — ответ» до закрытия.
 async fn handle(mut stream: TcpStream, model: Arc<PacModel>) -> Result<()> {
     let peer = stream.peer_addr().ok();
@@ -318,6 +332,9 @@ async fn handle(mut stream: TcpStream, model: Arc<PacModel>) -> Result<()> {
             break;
         }
         let cmd = payload.first().copied().unwrap_or(0);
+        if cmd == CMD_GET_DEVICES_STATES {
+            STATE_REQUESTS.fetch_add(1, Ordering::Relaxed);
+        }
         let (status, body) = model.handle_command(cmd, &payload);
         stream.write_all(&response(pidx, status, &body)).await?;
     }
@@ -330,6 +347,17 @@ pub async fn serve(listener: TcpListener, model: Arc<PacModel>) {
     if let Ok(addr) = listener.local_addr() {
         info!("PAC (driver-master v{PROTOCOL_VERSION}): порт {}", addr.port());
     }
+    tokio::spawn(async {
+        let mut last = 0;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let now = STATE_REQUESTS.load(Ordering::Relaxed);
+            if now != last {
+                info!("PAC: запросов состояния за 5 с: {}", now - last);
+                last = now;
+            }
+        }
+    });
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
@@ -370,10 +398,9 @@ mod tests {
     fn devices() -> Vec<PacDevice> {
         let f = |field: &str, address: &str| PacField { field: field.into(), address: address.into() };
         vec![
-            PacDevice { device: "LINE1V0".into(), dev_type: "V".into(), fields: vec![f("M", "460"), f("ST", "385")] },
+            PacDevice { device: "LINE1V0".into(), fields: vec![f("M", "460"), f("ST", "385")] },
             PacDevice {
                 device: "OBJECT1".into(),
-                dev_type: "Параметры_линии".into(),
                 fields: vec![
                     f("RT_PAR_F[12]", "96"),
                     f("RT_PAR_F[7]", "91"),
@@ -381,7 +408,7 @@ mod tests {
                     f("CUR_REC", "78"),
                 ],
             },
-            PacDevice { device: "1V1".into(), dev_type: "V".into(), fields: vec![f("ST", "9001")] },
+            PacDevice { device: "1V1".into(), fields: vec![f("ST", "9001")] },
         ]
     }
 
@@ -407,7 +434,7 @@ mod tests {
         let (status, body) = m.handle_command(CMD_GET_DEVICES_STATES, &[CMD_GET_DEVICES_STATES]);
         assert_eq!(status, STATUS_OK);
         assert_eq!(&body[..2], &1u16.to_le_bytes(), "первые 2 байта — devices_request_id");
-        String::from_utf8(body[2..].to_vec()).unwrap()
+        String::from_utf8(body[2..].to_vec()).unwrap().trim_end_matches('\0').to_string()
     }
 
     #[test]
@@ -434,17 +461,46 @@ mod tests {
     }
 
     #[test]
-    fn devices_and_info() {
+    fn devices_answer_like_states_and_ends_with_nul() {
+        // Прошивка на GET_DEVICES отвечает тем же снимком `t={…}`, что и на GET_DEVICES_STATES, а тело — C-строка:
+        // драйвер старой SCADA исполняет его как `luaL_dostring` и без нуля читает хвост прошлого ответа.
         let m = model(Box::new(|_, _, _, _| false));
-        let (_, body) = m.handle_command(CMD_GET_DEVICES, &[CMD_GET_DEVICES]);
-        let lua = String::from_utf8(body[2..].to_vec()).unwrap();
-        assert!(lua.starts_with("devices={}\n"));
-        assert!(lua.contains("devices['LINE1V0']={type='V',fields={'M','ST'}}\n"), "{lua}");
+        let (_, devices) = m.handle_command(CMD_GET_DEVICES, &[CMD_GET_DEVICES]);
+        let (_, states) = m.handle_command(CMD_GET_DEVICES_STATES, &[CMD_GET_DEVICES_STATES]);
+        assert_eq!(devices, states);
+        assert_eq!(devices.last(), Some(&0u8));
+        let lua = String::from_utf8(devices[2..].to_vec()).unwrap();
+        assert!(lua.starts_with("t=\n"), "{lua}");
+        assert!(lua.contains("LINE1V0={M=0, ST=1}"), "{lua}");
+    }
+
+    #[test]
+    fn info_and_errors() {
+        let m = model(Box::new(|_, _, _, _| false));
         let (_, info) = m.handle_command(CMD_GET_INFO_ON_CONNECT, &[CMD_GET_INFO_ON_CONNECT]);
         let info = String::from_utf8(info).unwrap();
         assert!(info.starts_with("protocol_version = 104;"), "{info}");
         assert!(info.contains("PAC_name = \"BN1-МСА1\""), "{info}");
-        assert_eq!(m.handle_command(CMD_GET_PAC_ERRORS, &[CMD_GET_PAC_ERRORS]), (STATUS_OK, b"errors={}\n".to_vec()));
+        assert_eq!(m.handle_command(CMD_GET_PAC_ERRORS, &[CMD_GET_PAC_ERRORS]), (STATUS_OK, b"errors={}\n\0".to_vec()));
+    }
+
+    #[test]
+    fn recipe_manager_is_one_array_table() {
+        // У прошивки рецептурный менеджер — массив `t.RECMAN[n]`; драйвер читает `RECMAN[1].PAR[5]` как `t.RECMAN[1].PAR[5]`.
+        let f = |field: &str, address: &str| PacField { field: field.into(), address: address.into() };
+        let devices = vec![
+            PacDevice { device: "RECMAN[1]".into(), fields: vec![f("CMD", "1"), f("PAR[2]", "2")] },
+            PacDevice { device: "RECMAN[2]".into(), fields: vec![f("CMD", "3")] },
+        ];
+        let m = PacModel::new("X", devices, Box::new(|_, _, _, _| false));
+        m.update_snapshot(HashMap::from([
+            ("1".into(), Value::Int(0)),
+            ("2".into(), Value::Float(1.5)),
+            ("3".into(), Value::Int(7)),
+        ]));
+        let lua = states_lua(&m);
+        assert!(lua.contains("RECMAN={\n\t\t[1]={CMD=0, PAR={[2]=1.5}},\n\t\t[2]={CMD=7},\n\t},"), "{lua}");
+        assert!(!lua.contains("RECMAN[1]"), "{lua}");
     }
 
     #[test]
@@ -471,6 +527,15 @@ mod tests {
         let log = applied.lock().unwrap();
         assert_eq!(log[2], ("LINE1V0".into(), "RT_PAR_F".into(), Some(12), Value::Float(7.5)));
         assert_eq!(log[3].3, Value::Text("abc".into()));
+        drop(log);
+        // Формат драйвера старой SCADA (EasyDriver): двойные кавычки, пробелы, рецептурный менеджер `RECMAN[n]`.
+        run(r#"__LINE1V0:set_cmd( "RT_PAR_F", 3, 10 )"#);
+        run(r#"__LINE1V0:set_cmd( "CUR_REC", 1, "abc" )"#);
+        run(r#"__RECMAN[2]:set_cmd( "PAR", 5, 2.5 )"#);
+        let log = applied.lock().unwrap();
+        assert_eq!(log[4], ("LINE1V0".into(), "RT_PAR_F".into(), Some(3), Value::Int(10)));
+        assert_eq!(log[5].3, Value::Text("abc".into()));
+        assert_eq!(log[6], ("RECMAN[2]".into(), "PAR".into(), Some(5), Value::Float(2.5)));
     }
 
     #[test]

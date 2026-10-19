@@ -64,11 +64,7 @@ fn pac_devices(plc: &Plc) -> Vec<PacDevice> {
             PacField { field: tag.field.clone().unwrap_or_else(|| tag.name.clone()), address: tag.address.clone() };
         match devices.iter_mut().find(|d| d.device == name) {
             Some(d) => d.fields.push(field),
-            None => devices.push(PacDevice {
-                device: name,
-                dev_type: tag.dev_type.clone().filter(|t| !t.is_empty()).unwrap_or_else(|| "DEV".into()),
-                fields: vec![field],
-            }),
+            None => devices.push(PacDevice { device: name, fields: vec![field] }),
         }
     }
     devices
