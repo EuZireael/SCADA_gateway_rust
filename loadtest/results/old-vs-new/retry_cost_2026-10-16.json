@@ -1,0 +1,26 @@
+[
+ {
+  "cap_ms": 10000,
+  "cores": 0.0097,
+  "kafka_msgs_per_s": 76.5,
+  "log_bytes_per_s": 51.5
+ },
+ {
+  "cap_ms": 2000,
+  "cores": 0.01,
+  "kafka_msgs_per_s": 88.6,
+  "log_bytes_per_s": 179.9
+ },
+ {
+  "cap_ms": 200,
+  "cores": 0.017,
+  "kafka_msgs_per_s": 92.9,
+  "log_bytes_per_s": 1676.8
+ },
+ {
+  "cap_ms": 50,
+  "cores": 0.041,
+  "kafka_msgs_per_s": 93.6,
+  "log_bytes_per_s": 6364.8
+ }
+]

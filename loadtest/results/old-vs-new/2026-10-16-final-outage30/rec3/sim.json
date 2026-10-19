@@ -1,0 +1,24 @@
+{
+  "source": "sim",
+  "date": "2026-10-16",
+  "modes": [
+    "easydriver",
+    "opcua"
+  ],
+  "recovery": {
+    "easydriver": {
+      "detected_bad_s": 0.8,
+      "bad_channels": 2658,
+      "recovered_good_s": 2.1,
+      "good_channels": 2658,
+      "recovered_after_plc_ready_s": 0.64
+    },
+    "opcua": {
+      "detected_bad_s": 0.8,
+      "bad_channels": 2658,
+      "recovered_good_s": 2.3,
+      "good_channels": 2658,
+      "recovered_after_plc_ready_s": 0.17
+    }
+  }
+}

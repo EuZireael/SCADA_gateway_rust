@@ -17,7 +17,7 @@
   clients    нагрузка на ПЛК от N одновременных шлюзов (1, 2, 4, 8) — только firmware;
   writes     команды записи: статус, время до эффекта в телеметрии, ловит ли режим «принял, но не применил»;
   writes_fast то же при опросе 100 мс и 12 командах (время до эффекта почти не зависит от периода опроса шлюза);
-  recovery   обрыв и возврат контроллера: за сколько шлюз это замечает и когда данные снова GOOD — только firmware.
+  recovery   обрыв и возврат контроллера: за сколько шлюз это замечает и когда данные снова GOOD (firmware и sim).
 
 Нужны: docker (Kafka и эмулятор прошивки), собранные release-бинарники шлюза, симулятора и ptusa-opcua, проект ПЛК
 (MOIKA_PROJECT, по умолчанию ../Moika/BN1-CIP1) для --source firmware. Результат — JSON и таблицы Markdown в --out.
@@ -40,16 +40,21 @@ ROOT = Path(__file__).resolve().parent.parent
 GATEWAY = ROOT / "target/release/scada-gateway"
 SIMULATOR = ROOT / "simulator/target/release/simulator"
 FACADE = ROOT / "ptusa-opcua/target/release/ptusa-opcua"
-STATIONS = {"opcua": ROOT / "config/stations/BN1_MCA1.yaml", "easydriver": ROOT / "config/stations/BN1_MCA1_easydriver.yaml"}
+STATION = os.environ.get("STATION", "BN1_MCA1")   # config/stations/<STATION>.yaml и <STATION>_easydriver.yaml
+STATIONS = {"opcua": ROOT / f"config/stations/{STATION}.yaml", "easydriver": ROOT / f"config/stations/{STATION}_easydriver.yaml"}
 KAFKA = "scada-cmp-kafka"
 KAFKA_PORT = 9194
-ENABLED_CHANNELS = 1834
-PTUSA = "ptusa-emulator"
-PTUSA_PAC_PORT = 10110
+ENABLED_CHANNELS = int(os.environ.get("ENABLED_CHANNELS", "1834"))   # включённых каналов в станции
+PTUSA = os.environ.get("PTUSA_NAME", "ptusa-emulator")   # имя контейнера эмулятора (и для ptusa_emulator.sh)
+PTUSA_PAC_PORT = int(os.environ.get("PTUSA_PAC_PORT", "10110"))
 FACADE_PORT = 4850
+OUTAGE_S = float(os.environ.get("OUTAGE_S", "0"))   # сценарий recovery: сколько секунд контроллер выключен (0 — вернуть сразу после обнаружения)
 FACADE_POLL_MS = os.environ.get("FACADE_POLL_MS", "500")   # период опроса прошивки фасадом (--facade-poll-ms)
-SIM_PAC_PORT = 10210
-SIM_OPC_PORT = 4860
+SIM_PAC_PORT = int(os.environ.get("SIM_PAC_PORT", "10210"))
+SIM_OPC_PORT = int(os.environ.get("SIM_OPC_PORT", "4860"))
+# Конфигурации симулятора (по умолчанию МСА1); для другой станции — SIM_CONFIG_PAC / SIM_CONFIG_OPCUA.
+SIM_CONFIG = {"easydriver": os.environ.get("SIM_CONFIG_PAC", "config/station_pac.yaml"),
+              "opcua": os.environ.get("SIM_CONFIG_OPCUA", "config/station_opcua.yaml")}
 CLK = os.sysconf("SC_CLK_TCK")
 
 
@@ -286,11 +291,13 @@ class Simulator:
 
     def start(self, mode):
         self.mode = mode
-        cfg = "config/station_pac.yaml" if mode == "easydriver" else "config/station_opcua.yaml"
+        cfg = SIM_CONFIG[mode]
         self.proc = Proc([str(SIMULATOR), cfg], {"PAC_PORT": str(SIM_PAC_PORT),
                                                  "OPCUA_ENDPOINT": f"opc.tcp://127.0.0.1:{SIM_OPC_PORT}"},
                          self.workdir / "simulator.log", cwd=ROOT / "simulator")
-        wait_port(SIM_PAC_PORT if mode == "easydriver" else SIM_OPC_PORT)
+        global READY_AT
+        wait_port(SIM_PAC_PORT if mode == "easydriver" else SIM_OPC_PORT, step=0.02)  # точность «готовности» важна для recovery
+        READY_AT = time.time()
         time.sleep(2)
 
     def stop(self):
@@ -302,7 +309,7 @@ class Simulator:
         return {"plc": self.proc.pid} if self.proc else {}
 
 
-def wait_port(port, timeout=60):
+def wait_port(port, timeout=60, step=0.5):
     import socket
     end = time.time() + timeout
     while time.time() < end:
@@ -310,13 +317,17 @@ def wait_port(port, timeout=60):
             socket.create_connection(("127.0.0.1", port), 1).close()
             return
         except OSError:
-            time.sleep(0.5)
+            time.sleep(step)
     raise RuntimeError(f"порт {port} не открылся")
+
+
+READY_AT = 0.0   # когда ПЛК в последний раз ответил приветствием PAC (для «восстановлено после готовности ПЛК»)
 
 
 def wait_banner(port, timeout=90):
     """Ждать, пока ПЛК не пришлёт приветствие PAC (прошивка поднимается несколько секунд)."""
     import socket
+    global READY_AT
     end = time.time() + timeout
     while time.time() < end:
         try:
@@ -325,10 +336,11 @@ def wait_banner(port, timeout=90):
             data = s.recv(10)
             s.close()
             if data.startswith(b"PAC accept"):
+                READY_AT = time.time()
                 return
         except OSError:
             pass
-        time.sleep(1)
+        time.sleep(0.1)
     raise RuntimeError(f"PAC на порту {port} не отвечает")
 
 
@@ -550,6 +562,8 @@ def sc_writes(modes, src_factory, workdir, out, verify_ms, poll_ms=1000, samples
     result = {}
     text = STATIONS["opcua"].read_text(encoding="utf-8")
     effective = WRITE_TAGS["effective"]
+    if os.environ.get("WRITE_DEVICE"):  # другая станция: WRITE_DEVICE=OBJECT2 WRITE_FIELD="S_PAR_F[ 1 ]"
+        effective = find_tag(os.environ["WRITE_DEVICE"], os.environ["WRITE_FIELD"], text)
     ignored = find_tag("LT1", "CLEVEL", text)  # уровень в баке: считает программа, прошивка принимает запись (код 0) и не меняет
     note(f"эффективный тег: {effective}; игнорируемый: {ignored}")
     for mode in modes:
@@ -629,6 +643,11 @@ def sc_recovery(modes, src_factory, workdir, out):
                     break
                 time.sleep(0.2)
             note(f"{mode}: BAD у {len(seen)} каналов; обнаружено за {bad_after}")
+            # Длина обрыва от отключения до возврата контроллера (OUTAGE_S): от неё зависит, на каком шаге повторных
+            # попыток окажется шлюз (у OPC UA паузы растут 1, 2, 4, 8 с).
+            hold = OUTAGE_S - (time.time() - t_cut)
+            if hold > 0:
+                time.sleep(hold)
             t_back = time.time()
             mark = tail.mark()
             src.start_plc()
@@ -640,9 +659,20 @@ def sc_recovery(modes, src_factory, workdir, out):
                     recovered = time.time() - t_back
                     break
                 time.sleep(0.2)
-            note(f"{mode}: GOOD у {len(good)} каналов; восстановлено за {recovered}")
+            # Отсчёт от момента, когда ПЛК ответил приветствием PAC, по меткам времени сообщений (а не по моменту
+            # опроса этого скрипта): в start_plc входят запуск контейнера и пауза, к шлюзу они отношения не имеют.
+            first_good = {}
+            for t, key, b in tail.since(mark):
+                if t >= t_back * 1000 and b.get("quality") == "GOOD" and key not in first_good:
+                    first_good[key] = t
+            after_ready = None
+            need = int(ENABLED_CHANNELS * 0.9)
+            if len(first_good) >= need:
+                after_ready = sorted(first_good.values())[need - 1] / 1000 - READY_AT
+            note(f"{mode}: GOOD у {len(good)} каналов; восстановлено за {recovered}; после готовности ПЛК {after_ready}")
             result[mode] = {"detected_bad_s": round(bad_after, 1) if bad_after else None, "bad_channels": len(seen),
-                            "recovered_good_s": round(recovered, 1) if recovered else None, "good_channels": len(good)}
+                            "recovered_good_s": round(recovered, 1) if recovered else None, "good_channels": len(good),
+                            "recovered_after_plc_ready_s": round(after_ready, 2) if after_ready is not None else None}
         finally:
             if tail:
                 tail.close()

@@ -1,0 +1,140 @@
+{
+  "source": "sim",
+  "date": "2026-10-16",
+  "modes": [
+    "easydriver",
+    "opcua"
+  ],
+  "writes_fast": {
+    "easydriver": {
+      "effective": [
+        {
+          "status": "APPLIED",
+          "result_ms": 884,
+          "effect_ms": 134
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 854,
+          "effect_ms": 91
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 849,
+          "effect_ms": 89
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 850,
+          "effect_ms": 102
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 847,
+          "effect_ms": 83
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 842,
+          "effect_ms": 75
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 846,
+          "effect_ms": 61
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 846,
+          "effect_ms": 54
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 854,
+          "effect_ms": 115
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 841,
+          "effect_ms": 121
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 855,
+          "effect_ms": 89
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 861,
+          "effect_ms": 114
+        }
+      ],
+      "ignored": []
+    },
+    "opcua": {
+      "effective": [
+        {
+          "status": "APPLIED",
+          "result_ms": 838,
+          "effect_ms": 76
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 842,
+          "effect_ms": 47
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 837,
+          "effect_ms": 97
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 845,
+          "effect_ms": 123
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 838,
+          "effect_ms": 128
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 835,
+          "effect_ms": 131
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 836,
+          "effect_ms": 107
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 838,
+          "effect_ms": 81
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 833,
+          "effect_ms": 83
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 835,
+          "effect_ms": 107
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 836,
+          "effect_ms": 92
+        },
+        {
+          "status": "APPLIED",
+          "result_ms": 844,
+          "effect_ms": 83
+        }
+      ],
+      "ignored": []
+    }
+  }
+}
