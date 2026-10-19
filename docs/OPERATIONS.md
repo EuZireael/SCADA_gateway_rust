@@ -15,7 +15,7 @@ docker run -d --name scada-gateway -p 8888:8888 \
   -e SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092 \
   -e SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/scada_db \
   -e GATEWAY_API_TOKEN_FILE=/run/secrets/gateway_api_token \
-  ghcr.io/euzireael/scada_rust:v0.4.0
+  ghcr.io/euzireael/scada_rust:v0.4.1
 ```
 
 Ключи переменных те же, что у Java-шлюза (Spring relaxed binding): и `GATEWAY_PUBLISH_FULL_RESEND_MS`, и
