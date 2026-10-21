@@ -62,6 +62,8 @@ async fn write_to_a_program_owned_valve_is_reported_as_not_applied_until_manual_
     let opposite = json!(toggled(&current).as_f64().unwrap() as i64);
 
     let gw = Gateway::start_with(&controllers_path(), &[("GATEWAY_COMMANDS_VERIFY_MS", "1500")]);
+    // Команда до подключения контроллера честно получает FAILED_NO_CONNECTION: приём команд включается раньше.
+    gw.wait_links("UP", Duration::from_secs(30)).await;
     let producer: FutureProducer = kafka_config().create().unwrap();
     let results = consumer_from_beginning(&gw.topic("results")).await;
 
@@ -96,6 +98,8 @@ async fn pac_write_to_a_program_owned_valve_is_reported_as_not_applied_until_man
     let opposite = json!(toggled(&current).as_f64().unwrap() as i64);
 
     let gw = Gateway::start_with(&controllers_path(), &[("GATEWAY_COMMANDS_VERIFY_MS", "1500")]);
+    // Команда до подключения контроллера честно получает FAILED_NO_CONNECTION: приём команд включается раньше.
+    gw.wait_links("UP", Duration::from_secs(30)).await;
     let producer: FutureProducer = kafka_config().create().unwrap();
     let results = consumer_from_beginning(&gw.topic("results")).await;
 
