@@ -16,7 +16,7 @@ use crate::app::{App, ControllerHandle};
 use crate::events::Event;
 use crate::modbus::{self, ModbusClient};
 use crate::model::{ControllerKind, Protocol, Quality, Reading, Tag, Timestamp};
-use crate::opcua::{self, ConnectOptions, OpcConnection, ReadValueId};
+use crate::opcua::{self, ConnectOptions, NodeReport, OpcConnection, PreparedNodes, ReadValueId};
 use crate::pac::{self, PacConnection};
 use crate::schedule::PollSchedule;
 use crate::telemetry::{Processor, all_bad};
@@ -88,20 +88,49 @@ async fn pause(cancel: &CancellationToken, d: Duration) -> bool {
 
 // ------------------------------------------------------------------------ OPC UA --
 
-/// Теги OPC UA контроллера с разобранными адресами узлов (тег с неверным адресом пропускается).
-fn opcua_nodes(handle: &ControllerHandle) -> (Vec<Arc<Tag>>, Vec<ReadValueId>) {
-    let mut tags = Vec::new();
-    let mut nodes = Vec::new();
-    for tag in tags_of(handle, Protocol::OpcUa) {
-        match opcua::read_value_id(&tag.node_id) {
-            Ok(n) => {
-                nodes.push(n);
-                tags.push(tag);
-            }
-            Err(e) => warn!("{}: тег {} пропущен: {e}", handle.ctrl.name, tag.name),
-        }
+/// Сколько строк каждого списка проверки узлов показывать в журнале.
+const REPORT_LOG_LINES: usize = 10;
+/// Сколько строк каждого списка — в событии и `/api/status`.
+const REPORT_DETAIL_LINES: usize = 50;
+
+/// Итог проверки узлов после подключения: в журнал и событие `CONFIG` — только если он изменился (после
+/// переподключения к той же программе ПЛК не повторяется), в `/api/status` — всегда последний.
+fn report_nodes(app: &App, handle: &ControllerHandle, report: &NodeReport) {
+    if !handle.set_node_report(report.clone()) {
+        return;
     }
-    (tags, nodes)
+    let name = &handle.ctrl.name;
+    if let Some(limit) = report.max_nodes_per_read.filter(|&n| n > 0 && (n as usize) < opcua::READ_CHUNK) {
+        info!("{name}: сервер принимает до {limit} узлов в запросе — читаю пачками по {}", report.read_chunk);
+    }
+    for (list, what) in [
+        (&report.unresolved, "адрес узла не разобран, теги не читаются"),
+        (&report.unknown, "узлов нет на сервере, теги будут BAD"),
+        (&report.unsupported, "значения узлов шлюз не передаёт, теги будут BAD"),
+        (&report.mismatched, "dataType тегов не совпадает с типом узлов, значения идут в типе узла"),
+    ] {
+        if list.is_empty() {
+            continue;
+        }
+        let shown = list.iter().take(REPORT_LOG_LINES).cloned().collect::<Vec<_>>().join("; ");
+        let more = list.len().saturating_sub(REPORT_LOG_LINES);
+        let tail = if more > 0 { format!("; и ещё {more}") } else { String::new() };
+        warn!("⚠ {name}: {what} ({}): {shown}{tail}", list.len());
+    }
+    if report.has_problems() {
+        let counts = format!(
+            "адрес не разобран {}, нет на сервере {}, не передаётся {}, тип не совпадает {}",
+            report.unresolved.len(),
+            report.unknown.len(),
+            report.unsupported.len(),
+            report.mismatched.len()
+        );
+        app.events.emit(
+            Event::new("CONFIG", "Gateway", "WARNING", format!("{name}: узлы OPC UA — {counts}"))
+                .controller(handle.ctrl.id)
+                .details(report.summary(REPORT_DETAIL_LINES)),
+        );
+    }
 }
 
 /// Записать в журнал режим защиты канала и предупредить о небезопасных сочетаниях.
@@ -277,7 +306,7 @@ fn pause_after_failure(e: &anyhow::Error, fails: u32, base: Duration) -> Duratio
 /// Цикл OPC UA: подключение → чтение до обрыва → закрытие и пересоздание сессии; пока подключения нет — кадры BAD на каждой попытке.
 async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: CancellationToken) {
     let gw = app.settings.gateway.clone();
-    let (tags, nodes) = opcua_nodes(&handle);
+    let all_tags = tags_of(&handle, Protocol::OpcUa);
     let mut processor = Processor::new(app.clone(), handle.clone());
     let mut schedule = PollSchedule::new(handle.ctrl.tags.len(), Duration::from_millis(handle.ctrl.cycle_period_ms()));
     let opts = ConnectOptions::for_controller(&handle.ctrl.opc_security, &gw);
@@ -285,11 +314,23 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
     let mut fails: u32 = 0;
 
     while !cancel.is_cancelled() {
-        let conn = match OpcConnection::connect_with(&handle.ctrl.endpoint, gw.opcua_op_timeout, &opts).await {
-            Ok(c) => Arc::new(c),
+        // Подключение и разбор узлов тегов (адреса, типы, предел запроса) — заново на каждой сессии: программу ПЛК
+        // могли поменять. Сервер, переставший отвечать при разборе, — та же неудача подключения.
+        let connected = match OpcConnection::connect_with(&handle.ctrl.endpoint, gw.opcua_op_timeout, &opts).await {
+            Ok(mut c) => match c.prepare(&all_tags).await {
+                Ok(prepared) => Ok((c, prepared)),
+                Err(e) => {
+                    c.close().await;
+                    Err(e)
+                }
+            },
+            Err(e) => Err(e),
+        };
+        let (conn, PreparedNodes { tags, nodes, unresolved, report }) = match connected {
+            Ok((c, prepared)) => (Arc::new(c), prepared),
             Err(e) => {
                 fails += 1;
-                on_connect_failed(&app, &handle, &mut processor, &tags, fails, &e);
+                on_connect_failed(&app, &handle, &mut processor, &all_tags, fails, &e);
                 if !pause(&cancel, pause_after_failure(&e, fails, gw.reconnect_interval)).await {
                     return;
                 }
@@ -298,6 +339,11 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
         };
         fails = 0;
         handle.touch();
+        report_nodes(&app, &handle, &report);
+        // Теги, которые не читаются (адрес не разобран), — BAD сразу: иначе монитор показывал бы последнее значение.
+        if !unresolved.is_empty() {
+            processor.process(&all_bad(&unresolved));
+        }
         // С этого момента команды записи используют эту сессию.
         handle.set_opc_connection(Some(conn.clone()));
         info!("✅ OPC UA socket up: {} — опрос запущен", handle.ctrl.name);

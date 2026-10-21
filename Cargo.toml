@@ -26,6 +26,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.26.1", features = ["v4"] }
 
 [dev-dependencies]
+# Сервер OPC UA в процессе теста (tests/opcua_server.rs): строгий к типам, с пределом узлов в запросе. Только для тестов.
+async-opcua = { version = "0.19.0", features = ["client", "server"] }
 tokio = { version = "1", features = ["test-util"] }
 tempfile = "3.27.0"
 

@@ -15,7 +15,7 @@ use crate::kafka::KafkaOut;
 use crate::leadership::Leadership;
 use crate::metrics::Metrics;
 use crate::model::{Controller, Tag};
-use crate::opcua::OpcConnection;
+use crate::opcua::{NodeReport, OpcConnection};
 use crate::pac::PacConnection;
 use crate::script::Scripts;
 
@@ -38,6 +38,8 @@ pub struct ControllerHandle {
     error_streak: AtomicU32,
     /// Текущая OPC UA-сессия (её же использует запись команд).
     pub opc: Mutex<Option<Arc<OpcConnection>>>,
+    /// Итог проверки узлов OPC UA при последнем подключении (для `/api/status`).
+    node_report: Mutex<Option<NodeReport>>,
     /// Соединение PAC: команда идёт по тому же каналу, что и опрос (как у драйвера).
     pub pac: tokio::sync::Mutex<Option<PacConnection>>,
     /// «Опроси сейчас» после удачной записи (см. GatewaySettings::poll_after_write). Notify хранит
@@ -54,6 +56,7 @@ impl ControllerHandle {
             last_good_ms: AtomicI64::new(now_ms()),
             error_streak: AtomicU32::new(0),
             opc: Mutex::new(None),
+            node_report: Mutex::new(None),
             pac: tokio::sync::Mutex::new(None),
             poll_now: tokio::sync::Notify::new(),
         }
@@ -100,6 +103,19 @@ impl ControllerHandle {
     /// Запомнить новую сессию или `None` после её закрытия.
     pub fn set_opc_connection(&self, conn: Option<Arc<OpcConnection>>) {
         *self.opc.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = conn;
+    }
+
+    /// Итог проверки узлов при последнем подключении по OPC UA.
+    pub fn node_report(&self) -> Option<NodeReport> {
+        self.node_report.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// Запомнить итог проверки узлов; true — он отличается от прежнего.
+    pub fn set_node_report(&self, report: NodeReport) -> bool {
+        let mut current = self.node_report.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changed = current.as_ref() != Some(&report);
+        *current = Some(report);
+        changed
     }
 }
 

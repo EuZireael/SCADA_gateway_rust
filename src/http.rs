@@ -114,9 +114,14 @@ async fn status(State(app): State<Arc<App>>) -> Json<Value> {
         .controllers
         .iter()
         .map(|c| {
-            json!({"id": c.ctrl.id, "name": c.ctrl.name, "endpoint": c.ctrl.endpoint,
+            let mut status = json!({"id": c.ctrl.id, "name": c.ctrl.name, "endpoint": c.ctrl.endpoint,
                         "protocol": format!("{:?}", c.ctrl.kind), "connected": c.is_connected(),
-                        "tags": c.ctrl.tags.len()})
+                        "tags": c.ctrl.tags.len()});
+            // Проверка узлов OPC UA при последнем подключении: неизвестные узлы, типы, предел запроса.
+            if let Some(report) = c.node_report() {
+                status["opcua"] = report.summary(50);
+            }
+            status
         })
         .collect();
     Json(json!({

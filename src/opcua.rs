@@ -4,30 +4,36 @@
 //! discovery клиент уходил на адрес, который анонсирует сервер, и с хоста не подключался
 //! (`opc.tcp://simulator:4840`). Политика безопасности — None, как у стенда.
 //!
-//! Чтение — пачками по [`READ_CHUNK`] узлов: по умолчанию клиент декодирует массивы не
-//! длиннее 1000 элементов, а у реальных серверов бывает MaxNodesPerRead.
+//! Чтение — пачками не больше [`READ_CHUNK`] узлов и не больше `MaxNodesPerRead` сервера: на запрос сверх своего
+//! предела сервер отвечает `Bad_TooManyOperations` целиком, а клиент async-opcua предел сам не учитывает.
+//!
+//! После подключения [`OpcConnection::prepare`] разбирает адреса узлов (`nsu=` — по таблице пространств имён сервера) и
+//! читает их тип: запись идёт в типе узла, а не в типе из `dataType` тега, — сервер проверяет тип строго.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::Utc;
 use opcua::client::{Client, ClientBuilder, IdentityToken, Session};
 use opcua::crypto::SecurityPolicy;
-pub use opcua::types::ReadValueId;
 use opcua::types::{
-    AttributeId, DataValue, EndpointDescription, MessageSecurityMode, NodeId, NumericRange, StatusCode,
-    TimestampsToReturn, UAString, UserTokenPolicy, Variant, WriteValue,
+    AttributeId, DataValue, EndpointDescription, Identifier, MessageSecurityMode, NumericRange, StatusCode,
+    TimestampsToReturn, UAString, UserTokenPolicy, VariableId, Variant, WriteValue,
 };
+pub use opcua::types::{NodeId, ReadValueId};
+use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::model::{self, OpcMode, OpcPolicy, OpcSecurity, Quality, TagValue, Timestamp};
+use crate::model::{self, OpcMode, OpcPolicy, OpcSecurity, Quality, Tag, TagValue, Timestamp};
 
-/// Узлов в одном запросе чтения.
+/// Узлов в одном запросе чтения, если сервер не требует меньше.
 pub const READ_CHUNK: usize = 500;
 
 /// Живое соединение с OPC UA-сервером: сессия и задача её цикла событий. Закрывается [`OpcConnection::close`].
@@ -36,6 +42,15 @@ pub struct OpcConnection {
     event_loop: JoinHandle<StatusCode>,
     _client: Client,
     op_timeout: Duration,
+    /// Адрес сервера (для журнала).
+    url: String,
+    /// Узлов в запросе чтения: не больше [`READ_CHUNK`] и `MaxNodesPerRead` сервера; на `Bad_TooManyOperations`
+    /// уменьшается вдвое и остаётся таким до конца сессии.
+    chunk: AtomicUsize,
+    /// Таблица пространств имён сервера (`NamespaceArray`): по ней адрес `nsu=<URI>;…` переводится в индекс.
+    namespaces: Vec<String>,
+    /// Узлы тегов, разобранные в [`OpcConnection::prepare`]: адрес из конфигурации → узел и его тип.
+    nodes: HashMap<String, NodeInfo>,
 }
 
 /// Сколько ждать TCP-подключения при выборе адреса из нескольких.
@@ -208,7 +223,16 @@ impl OpcConnection {
                 bail!("OPC UA {url}: таймаут {} мс (handshake завис)", op_timeout.as_millis());
             }
         }
-        Ok(OpcConnection { session, event_loop, _client: client, op_timeout })
+        Ok(OpcConnection {
+            session,
+            event_loop,
+            _client: client,
+            op_timeout,
+            url: url.to_string(),
+            chunk: AtomicUsize::new(READ_CHUNK),
+            namespaces: Vec::new(),
+            nodes: HashMap::new(),
+        })
     }
 
     /// Сессия жива, пока крутится её event loop.
@@ -216,20 +240,127 @@ impl OpcConnection {
         !self.event_loop.is_finished()
     }
 
-    /// Прочитать значения узлов (порядок результатов = порядок `nodes`).
+    /// Узлов в одном запросе чтения сейчас.
+    pub fn read_chunk(&self) -> usize {
+        self.chunk.load(Ordering::Relaxed)
+    }
+
+    /// Прочитать атрибуты узлов (порядок результатов = порядок `nodes`) пачками не больше [`Self::read_chunk`].
     pub async fn read(&self, nodes: &[ReadValueId]) -> Result<Vec<DataValue>> {
         let mut out = Vec::with_capacity(nodes.len());
-        for chunk in nodes.chunks(READ_CHUNK) {
-            let values = timeout(self.op_timeout, self.session.read(chunk, TimestampsToReturn::Both, 0.0))
+        let mut rest = nodes;
+        while !rest.is_empty() {
+            let size = self.read_chunk().clamp(1, rest.len());
+            let chunk = &rest[..size];
+            let result = timeout(self.op_timeout, self.session.read(chunk, TimestampsToReturn::Both, 0.0))
                 .await
-                .with_context(|| format!("таймаут чтения {} мс (сервер завис)", self.op_timeout.as_millis()))?
-                .map_err(|e| anyhow!("{e}"))?;
-            if values.len() != chunk.len() {
-                bail!("сервер вернул {} значений на {} узлов", values.len(), chunk.len());
+                .with_context(|| format!("таймаут чтения {} мс (сервер завис)", self.op_timeout.as_millis()))?;
+            match result {
+                Ok(values) => {
+                    if values.len() != chunk.len() {
+                        bail!("сервер вернул {} значений на {} узлов", values.len(), chunk.len());
+                    }
+                    out.extend(values);
+                    rest = &rest[size..];
+                }
+                // Сервер не принимает столько узлов в одном запросе (предел не назвал или назвал больше, чем принимает):
+                // пачку вдвое меньше и повторить. Новый размер остаётся и для следующих чтений этой сессии.
+                Err(e) if same_status(e.status(), StatusCode::BadTooManyOperations) && size > 1 => {
+                    let smaller = size / 2;
+                    let before = self.chunk.fetch_min(smaller, Ordering::Relaxed);
+                    if before > smaller {
+                        warn!(
+                            "OPC UA {}: сервер не принимает {size} узлов в одном запросе — читаю по {smaller}",
+                            self.url
+                        );
+                    }
+                }
+                Err(e) => bail!("{e}"),
             }
-            out.extend(values);
         }
         Ok(out)
+    }
+
+    /// Разобрать узлы тегов и узнать о них то, что нужно для чтения и записи: предел узлов в запросе, таблицу
+    /// пространств имён (для `nsu=`), тип значения и размерность каждого узла. Вызывается после подключения, до опроса.
+    ///
+    /// Ошибка — только если сервер перестал отвечать (таймаут, сессия закрыта): это обрыв, как неудачное подключение.
+    /// Если сервер отказал в чтении служебных узлов или атрибутов, шлюз работает как без проверки: пачки по
+    /// [`READ_CHUNK`], запись по `dataType` тега.
+    pub async fn prepare(&mut self, tags: &[Arc<Tag>]) -> Result<PreparedNodes> {
+        let mut report = NodeReport::default();
+        let server =
+            [VariableId::Server_NamespaceArray, VariableId::Server_ServerCapabilities_OperationLimits_MaxNodesPerRead]
+                .map(|id| ReadValueId::from(NodeId::from(id)));
+        match self.read(&server).await {
+            Ok(values) => {
+                self.namespaces = string_array(values[0].value.as_ref());
+                report.max_nodes_per_read = match values[1].value {
+                    Some(Variant::UInt32(n)) if values[1].status().is_good() => Some(n),
+                    _ => None,
+                };
+                // 0 — сервер предела не ставит.
+                if let Some(limit) = report.max_nodes_per_read.filter(|&n| n > 0) {
+                    self.chunk.fetch_min(limit as usize, Ordering::Relaxed);
+                }
+            }
+            Err(e) if self.is_fatal(&e) => return Err(e.context("чтение сведений о сервере")),
+            Err(e) => warn!("OPC UA {}: сведения о сервере не прочитаны ({e:#}) — пачки по {READ_CHUNK}", self.url),
+        }
+
+        let mut prepared = PreparedNodes::default();
+        let mut resolved: Vec<(Arc<Tag>, NodeId)> = Vec::with_capacity(tags.len());
+        for tag in tags {
+            match resolve_node_id(&tag.node_id, &self.namespaces) {
+                Ok(id) => resolved.push((tag.clone(), id)),
+                Err(e) => {
+                    report.unresolved.push(format!("{} ({}): {e:#}", tag.name, tag.node_id));
+                    prepared.unresolved.push(tag.clone());
+                }
+            }
+        }
+
+        let attributes: Vec<ReadValueId> = resolved
+            .iter()
+            .flat_map(|(_, id)| {
+                [AttributeId::DataType, AttributeId::ValueRank].map(|attribute| ReadValueId::new(id.clone(), attribute))
+            })
+            .collect();
+        let described = match self.read(&attributes).await {
+            Ok(values) => Some(values),
+            Err(e) if self.is_fatal(&e) => return Err(e.context("чтение типов узлов")),
+            Err(e) => {
+                warn!("OPC UA {}: типы узлов не прочитаны ({e:#}) — запись по dataType тегов", self.url);
+                report.types_unknown = true;
+                None
+            }
+        };
+        for (k, (tag, id)) in resolved.into_iter().enumerate() {
+            let info = match &described {
+                Some(values) => describe(&tag, id, &values[2 * k], &values[2 * k + 1], &mut report),
+                None => NodeInfo { id, kind: None, array: false },
+            };
+            prepared.nodes.push(ReadValueId::from(info.id.clone()));
+            self.nodes.insert(tag.node_id.clone(), info);
+            prepared.tags.push(tag);
+        }
+        report.read_chunk = self.read_chunk();
+        prepared.report = report;
+        Ok(prepared)
+    }
+
+    /// Ошибка чтения означает обрыв: таймаут или закрытая сессия (а не отказ живого сервера).
+    fn is_fatal(&self, e: &anyhow::Error) -> bool {
+        !self.is_alive() || e.downcast_ref::<tokio::time::error::Elapsed>().is_some()
+    }
+
+    /// Узел тега для записи и чтения команды: разобранный при подключении, а если его нет (соединение без
+    /// [`Self::prepare`]) — по адресу, без типа (запись по `dataType` тега).
+    pub fn node(&self, node_id: &str) -> Result<NodeInfo> {
+        if let Some(info) = self.nodes.get(node_id) {
+            return Ok(info.clone());
+        }
+        Ok(NodeInfo { id: resolve_node_id(node_id, &self.namespaces)?, kind: None, array: false })
     }
 
     /// Записать значение в узел; StatusCode — ответ сервера.
@@ -268,10 +399,330 @@ pub fn parse_node_id(node_id: &str) -> Result<NodeId> {
     node_id.parse::<NodeId>().map_err(|_| anyhow!("некорректный nodeId: {node_id}"))
 }
 
-/// Значение, качество и момент снятия из DataValue OPC UA.
+/// Разобрать адрес узла: `ns=<индекс>;…` (или без `ns=` — пространство 0) либо `nsu=<URI>;…` — тогда индекс берётся
+/// из таблицы пространств имён сервера `namespaces`. Индекс у сервера может смениться (обновление прошивки, новый
+/// модуль), URI — нет.
+pub fn resolve_node_id(node_id: &str, namespaces: &[String]) -> Result<NodeId> {
+    let Some(rest) = node_id.strip_prefix("nsu=") else { return parse_node_id(node_id) };
+    // URI кончается на первой `;`, за которой идёт тип идентификатора: i=, s=, g=, b=.
+    let split = rest.match_indices(';').map(|(i, _)| i).find(|&i| {
+        let tail = rest.as_bytes();
+        matches!(tail.get(i + 1), Some(b'i' | b's' | b'g' | b'b')) && tail.get(i + 2) == Some(&b'=')
+    });
+    let Some(i) = split else { bail!("некорректный nodeId: {node_id}") };
+    let (uri, identifier) = (&rest[..i], &rest[i + 1..]);
+    let Some(index) = namespaces.iter().position(|u| u == uri) else {
+        bail!("пространства имён {uri} нет на сервере")
+    };
+    let index = u16::try_from(index).map_err(|_| anyhow!("индекс пространства имён {index} вне диапазона"))?;
+    parse_node_id(&format!("ns={index};{identifier}")).map_err(|_| anyhow!("некорректный nodeId: {node_id}"))
+}
+
+/// Тот же код состояния без учёта младших битов (в них сервер кладёт подробности).
+fn same_status(a: StatusCode, b: StatusCode) -> bool {
+    a.bits() & 0xFFFF_0000 == b.bits() & 0xFFFF_0000
+}
+
+/// Массив строк из значения узла (`NamespaceArray`); не массив строк — пусто.
+fn string_array(value: Option<&Variant>) -> Vec<String> {
+    match value {
+        Some(Variant::Array(array)) => array
+            .values
+            .iter()
+            .map(|v| match v {
+                Variant::String(s) => s.as_ref().to_string(),
+                _ => String::new(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Тип узла по ответу сервера на чтение атрибутов `DataType` и `ValueRank`; что шлюзу с узлом не так — в `report`.
+fn describe(tag: &Tag, id: NodeId, data_type: &DataValue, value_rank: &DataValue, report: &mut NodeReport) -> NodeInfo {
+    let who = format!("{} ({})", tag.name, tag.node_id);
+    let status = data_type.status();
+    if same_status(status, StatusCode::BadNodeIdUnknown) {
+        report.unknown.push(who);
+        return NodeInfo { id, kind: None, array: false };
+    }
+    if same_status(status, StatusCode::BadAttributeIdInvalid) {
+        // Атрибута DataType нет только у не-переменных: значение такого узла не прочитать.
+        report.unsupported.push(format!("{who}: узел не переменная"));
+        return NodeInfo { id, kind: None, array: false };
+    }
+    let kind = match &data_type.value {
+        Some(Variant::NodeId(t)) if status.is_good() => NodeKind::from_data_type(t),
+        _ => None,
+    };
+    // ValueRank ≥ 0 — массив (0 — одна или больше размерностей); −1 — скаляр, −2 и −3 — может быть скаляром.
+    let array = matches!(value_rank.value, Some(Variant::Int32(rank)) if rank >= 0);
+    if array {
+        report.unsupported.push(format!("{who}: массив"));
+    } else if let Some(NodeKind::Unsupported(name)) = kind {
+        report.unsupported.push(format!("{who}: тип {name}"));
+    } else if let Some(kind) = kind
+        && type_conflict(&tag.data_type, kind)
+    {
+        report.mismatched.push(format!("{who}: dataType {}, узел {kind}", tag.data_type));
+    }
+    NodeInfo { id, kind, array }
+}
+
+/// Смысл типа: логический, целый, вещественный, строка.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sense {
+    Bool,
+    Integer,
+    Real,
+    Text,
+}
+
+/// Смысл `dataType` тега, включая принятые в ПЛК имена (`WORD`, `DINT`, `LREAL`); неизвестное имя — `None`.
+fn tag_sense(data_type: &str) -> Option<Sense> {
+    let t = data_type.trim().to_ascii_uppercase();
+    Some(if t.starts_with("BOOL") {
+        Sense::Bool
+    } else if model::is_float(&t) || t == "LREAL" {
+        Sense::Real
+    } else if model::is_string(&t) || t == "WSTRING" {
+        Sense::Text
+    } else if model::is_int(&t)
+        || t.starts_with("UINT")
+        || matches!(
+            t.as_str(),
+            "SINT" | "DINT" | "LINT" | "USINT" | "UDINT" | "ULINT" | "BYTE" | "WORD" | "DWORD" | "LWORD"
+        )
+    {
+        Sense::Integer
+    } else {
+        return None;
+    })
+}
+
+/// `dataType` тега по смыслу расходится с типом узла: значения пойдут в типе узла, а не в объявленном.
+fn type_conflict(data_type: &str, kind: NodeKind) -> bool {
+    match (tag_sense(data_type), kind.sense()) {
+        (Some(tag), Some(node)) => tag != node,
+        _ => false,
+    }
+}
+
+/// Встроенный тип значения узла (атрибут `DataType`): в нём сервер ждёт запись и проверяет тип строго.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeKind {
+    /// `Boolean`.
+    Boolean,
+    /// `SByte`: −128…127.
+    SByte,
+    /// `Byte`: 0…255.
+    Byte,
+    /// `Int16`.
+    Int16,
+    /// `UInt16`.
+    UInt16,
+    /// `Int32`.
+    Int32,
+    /// `UInt32`.
+    UInt32,
+    /// `Int64`.
+    Int64,
+    /// `UInt64`.
+    UInt64,
+    /// `Float`: 32 бита.
+    Float,
+    /// `Double`: 64 бита.
+    Double,
+    /// `String`.
+    String,
+    /// Тип, значения которого шлюз не передаёт: `DateTime`, `Guid`, `ByteString`, `LocalizedText`, структуры…
+    Unsupported(&'static str),
+}
+
+impl NodeKind {
+    /// Тип по атрибуту `DataType` узла. `None` — тип из пространства имён сервера (свой тип ПЛК) или абстрактный
+    /// (`Number`, `BaseDataType`): тогда запись идёт по `dataType` тега, как без проверки.
+    pub fn from_data_type(id: &NodeId) -> Option<Self> {
+        if id.namespace != 0 {
+            return None;
+        }
+        let Identifier::Numeric(n) = id.identifier else { return None };
+        Some(match n {
+            1 => NodeKind::Boolean,
+            2 => NodeKind::SByte,
+            3 => NodeKind::Byte,
+            4 => NodeKind::Int16,
+            5 => NodeKind::UInt16,
+            6 => NodeKind::Int32,
+            7 => NodeKind::UInt32,
+            8 => NodeKind::Int64,
+            9 => NodeKind::UInt64,
+            10 => NodeKind::Float,
+            11 => NodeKind::Double,
+            12 => NodeKind::String,
+            // Стандартные производные типы: на проводе — значения базового типа.
+            290 => NodeKind::Double,                       // Duration
+            288 | 289 => NodeKind::UInt32,                 // IntegerId, Counter
+            291 | 295 => NodeKind::String,                 // NumericRange, LocaleId
+            13 | 294 => NodeKind::Unsupported("DateTime"), // DateTime, UtcTime
+            14 => NodeKind::Unsupported("Guid"),
+            15 => NodeKind::Unsupported("ByteString"),
+            16 => NodeKind::Unsupported("XmlElement"),
+            17 | 18 => NodeKind::Unsupported("NodeId"),
+            19 => NodeKind::Unsupported("StatusCode"),
+            20 => NodeKind::Unsupported("QualifiedName"),
+            21 => NodeKind::Unsupported("LocalizedText"),
+            22 => NodeKind::Unsupported("Structure"),
+            _ => return None,
+        })
+    }
+
+    /// Смысл типа; у неподдерживаемого — нет.
+    fn sense(self) -> Option<Sense> {
+        Some(match self {
+            NodeKind::Boolean => Sense::Bool,
+            NodeKind::Float | NodeKind::Double => Sense::Real,
+            NodeKind::String => Sense::Text,
+            NodeKind::Unsupported(_) => return None,
+            _ => Sense::Integer,
+        })
+    }
+
+    /// Значение команды → Variant этого типа. Дробная часть у целых отбрасывается (как у целого тега), значение вне
+    /// диапазона типа — ошибка, а не обрезка: 300 в `Byte` записалось бы как 44.
+    pub fn variant(self, value: &TagValue) -> Result<Variant> {
+        Ok(match self {
+            NodeKind::Boolean => Variant::Boolean(match value {
+                TagValue::Bool(b) => *b,
+                other => other.as_f64().context("не число/bool")? != 0.0,
+            }),
+            NodeKind::SByte => Variant::SByte(self.integer(value, i8::MIN.into(), i8::MAX.into())?),
+            NodeKind::Byte => Variant::Byte(self.integer(value, u8::MIN.into(), u8::MAX.into())?),
+            NodeKind::Int16 => Variant::Int16(self.integer(value, i16::MIN.into(), i16::MAX.into())?),
+            NodeKind::UInt16 => Variant::UInt16(self.integer(value, u16::MIN.into(), u16::MAX.into())?),
+            NodeKind::Int32 => Variant::Int32(self.integer(value, i32::MIN.into(), i32::MAX.into())?),
+            NodeKind::UInt32 => Variant::UInt32(self.integer(value, u32::MIN.into(), u32::MAX.into())?),
+            NodeKind::Int64 => Variant::Int64(self.integer(value, i64::MIN.into(), i64::MAX.into())?),
+            NodeKind::UInt64 => Variant::UInt64(self.integer(value, u64::MIN.into(), u64::MAX.into())?),
+            NodeKind::Float => {
+                let f = value.as_f64().context("не число")?;
+                let narrow = f as f32;
+                ensure!(narrow.is_finite() || !f.is_finite(), "{f} вне диапазона Float");
+                Variant::Float(narrow)
+            }
+            NodeKind::Double => Variant::Double(value.as_f64().context("не число")?),
+            NodeKind::String => Variant::String(UAString::from(text(value))),
+            NodeKind::Unsupported(name) => bail!("узел типа {name}: запись не поддерживается"),
+        })
+    }
+
+    /// Целое значение команды для узла этого типа с диапазоном `min…max`.
+    fn integer<T: TryFrom<i128>>(self, value: &TagValue, min: i128, max: i128) -> Result<T> {
+        let n = match value {
+            TagValue::Int(i) => i128::from(*i),
+            other => {
+                let f = other.as_f64().context("не число")?;
+                ensure!(f.is_finite(), "{f} не конечное число");
+                f.trunc() as i128
+            }
+        };
+        ensure!((min..=max).contains(&n), "{n} вне диапазона {self} ({min}…{max})");
+        T::try_from(n).map_err(|_| anyhow!("{n} вне диапазона {self}"))
+    }
+}
+
+impl std::fmt::Display for NodeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NodeKind::Unsupported(name) => f.write_str(name),
+            other => write!(f, "{other:?}"),
+        }
+    }
+}
+
+/// Узел тега после подключения: разобранный адрес и тип значения, если сервер его сообщил.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeInfo {
+    /// Адрес узла (у `nsu=` — с индексом пространства имён этого сервера).
+    pub id: NodeId,
+    /// Тип значения; `None` — неизвестен, запись по `dataType` тега.
+    pub kind: Option<NodeKind>,
+    /// Узел — массив: шлюз передаёт только одиночные значения.
+    pub array: bool,
+}
+
+impl NodeInfo {
+    /// Значение команды → Variant для записи в этот узел: в типе узла, а если он неизвестен — по `dataType` тега.
+    pub fn variant(&self, data_type: &str, value: &TagValue) -> Result<Variant> {
+        ensure!(!self.array, "узел — массив, шлюз записывает только одиночные значения");
+        match self.kind {
+            Some(kind) => kind.variant(value),
+            None => to_variant(data_type, value),
+        }
+    }
+}
+
+/// Итог [`OpcConnection::prepare`]: что читать в цикле опроса и что не так с узлами.
+#[derive(Debug, Default)]
+pub struct PreparedNodes {
+    /// Теги, которые читаются (адрес разобран).
+    pub tags: Vec<Arc<Tag>>,
+    /// Узлы чтения значений — в порядке `tags`.
+    pub nodes: Vec<ReadValueId>,
+    /// Теги, адрес которых не разобран (или пространства имён `nsu=` нет на сервере): не читаются, всегда BAD.
+    pub unresolved: Vec<Arc<Tag>>,
+    /// Что выяснилось об узлах.
+    pub report: NodeReport,
+}
+
+/// Что выяснилось об узлах тегов при подключении (строки — «тег (адрес): пояснение»).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeReport {
+    /// Предел узлов в запросе чтения, названный сервером (`MaxNodesPerRead`; 0 — без предела).
+    pub max_nodes_per_read: Option<u32>,
+    /// Узлов в запросе чтения у этой сессии.
+    pub read_chunk: usize,
+    /// Типы узлов не прочитаны (сервер отказал): запись по `dataType` тегов.
+    pub types_unknown: bool,
+    /// Адрес не разобран или пространства имён `nsu=` нет на сервере: тег не читается.
+    pub unresolved: Vec<String>,
+    /// Узла нет на сервере (`Bad_NodeIdUnknown`): тег будет BAD.
+    pub unknown: Vec<String>,
+    /// Значение узла шлюз не передаёт (массив, `DateTime`, структура, не переменная): тег будет BAD.
+    pub unsupported: Vec<String>,
+    /// `dataType` тега по смыслу не совпадает с типом узла: значения идут в типе узла.
+    pub mismatched: Vec<String>,
+}
+
+impl NodeReport {
+    /// Есть ли что сообщить оператору.
+    pub fn has_problems(&self) -> bool {
+        !(self.unresolved.is_empty()
+            && self.unknown.is_empty()
+            && self.unsupported.is_empty()
+            && self.mismatched.is_empty())
+    }
+
+    /// Для `/api/status` и события: числа и не больше `limit` строк каждого списка.
+    pub fn summary(&self, limit: usize) -> Value {
+        let list = |v: &[String]| json!({"count": v.len(), "tags": v.iter().take(limit).collect::<Vec<_>>()});
+        json!({
+            "maxNodesPerRead": self.max_nodes_per_read,
+            "readChunk": self.read_chunk,
+            "typesUnknown": self.types_unknown,
+            "unresolved": list(&self.unresolved),
+            "unknownNodes": list(&self.unknown),
+            "unsupportedNodes": list(&self.unsupported),
+            "typeMismatch": list(&self.mismatched),
+        })
+    }
+}
+
+/// Значение, качество и момент снятия из DataValue OPC UA. Хороший статус без значения, которое шлюз умеет передать
+/// (пусто, массив, `DateTime`, структура), — BAD: иначе монитор получил бы `{"value": null, "quality": "GOOD"}`.
 pub fn reading(dv: &DataValue) -> (Option<TagValue>, Quality, Timestamp) {
-    let good = dv.status.map(|s| s.is_good()).unwrap_or(true);
     let value = dv.value.as_ref().and_then(extract_value);
+    let good = dv.status.map(|s| s.is_good()).unwrap_or(true) && value.is_some();
     // Момент снятия значения сервером: sourceTimestamp, иначе serverTimestamp, иначе сейчас.
     let ts = [dv.source_timestamp, dv.server_timestamp]
         .into_iter()
@@ -293,7 +744,8 @@ pub fn extract_value(v: &Variant) -> Option<TagValue> {
         Variant::Int32(n) => TagValue::Int(*n as i64),
         Variant::UInt32(n) => TagValue::Int(*n as i64),
         Variant::Int64(n) => TagValue::Int(*n),
-        Variant::UInt64(n) => TagValue::Int(*n as i64),
+        // Больше i64::MAX на проводе не передать: отрицательное число было бы неправдой.
+        Variant::UInt64(n) => TagValue::Int(i64::try_from(*n).ok()?),
         Variant::Float(f) => TagValue::F32(*f),
         Variant::Double(f) => TagValue::F64(*f),
         Variant::String(s) => TagValue::Text(s.as_ref().to_string()),
@@ -315,10 +767,7 @@ pub fn to_variant(data_type: &str, value: &TagValue) -> Result<Variant> {
     } else if dt.starts_with("DOUBLE") {
         Variant::Double(value.as_f64().context("не число")?)
     } else if model::is_string(&dt) {
-        Variant::String(UAString::from(match value {
-            TagValue::Text(s) => s.clone(),
-            other => serde_json::to_string(other).unwrap_or_default(),
-        }))
+        Variant::String(UAString::from(text(value)))
     } else {
         match value {
             TagValue::Bool(b) => Variant::Boolean(*b),
@@ -328,6 +777,14 @@ pub fn to_variant(data_type: &str, value: &TagValue) -> Result<Variant> {
             TagValue::Text(s) => Variant::String(UAString::from(s.clone())),
         }
     })
+}
+
+/// Значение строкой для строкового узла: строка как есть, остальное — JSON-литерал.
+fn text(value: &TagValue) -> String {
+    match value {
+        TagValue::Text(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
 }
 
 /// Исход неудачной записи по StatusCode сервера (коды — OPC UA Part 4/6).
@@ -415,5 +872,115 @@ mod tests {
     fn node_id_parsing() {
         assert!(parse_node_id("ns=2;s=6").is_ok());
         assert!(parse_node_id("pac:385").is_err());
+    }
+
+    /// `nsu=<URI>` переводится в индекс по таблице сервера; `ns=` и адрес без пространства — как раньше.
+    #[test]
+    fn namespace_uri_is_resolved_by_the_server_table() {
+        let table =
+            ["http://opcfoundation.org/UA/", "urn:server", "http://www.siemens.com/simatic-s7-opcua"].map(String::from);
+        assert_eq!(
+            resolve_node_id("nsu=http://www.siemens.com/simatic-s7-opcua;s=\"DB1\".\"Temp\"", &table).unwrap(),
+            NodeId::new(2, "\"DB1\".\"Temp\"")
+        );
+        assert_eq!(resolve_node_id("nsu=urn:server;i=42", &table).unwrap(), NodeId::new(1, 42u32));
+        // `;` в строковом идентификаторе — часть идентификатора, а не конец URI.
+        assert_eq!(resolve_node_id("nsu=urn:server;s=a;b", &table).unwrap(), NodeId::new(1, "a;b"));
+        assert_eq!(resolve_node_id("ns=2;s=6", &table).unwrap(), NodeId::new(2, "6"));
+        assert_eq!(resolve_node_id("i=2255", &[]).unwrap(), NodeId::new(0, 2255u32));
+        let missing = resolve_node_id("nsu=urn:other;s=x", &table).unwrap_err().to_string();
+        assert!(missing.contains("urn:other"), "{missing}");
+        assert!(resolve_node_id("nsu=urn:server", &table).is_err());
+        assert!(resolve_node_id("nsu=urn:server;x=1", &table).is_err());
+    }
+
+    #[test]
+    fn node_kind_by_data_type() {
+        let ns0 = |n: u32| NodeId::new(0, n);
+        assert_eq!(NodeKind::from_data_type(&ns0(4)), Some(NodeKind::Int16));
+        assert_eq!(NodeKind::from_data_type(&ns0(5)), Some(NodeKind::UInt16));
+        assert_eq!(NodeKind::from_data_type(&ns0(10)), Some(NodeKind::Float));
+        assert_eq!(NodeKind::from_data_type(&ns0(290)), Some(NodeKind::Double)); // Duration
+        assert_eq!(NodeKind::from_data_type(&ns0(13)), Some(NodeKind::Unsupported("DateTime")));
+        // Абстрактный Number и свой тип сервера — неизвестны: запись по dataType тега.
+        assert_eq!(NodeKind::from_data_type(&ns0(26)), None);
+        assert_eq!(NodeKind::from_data_type(&NodeId::new(3, 3003u32)), None);
+        assert_eq!(NodeKind::from_data_type(&NodeId::new(0, "x")), None);
+    }
+
+    #[test]
+    fn values_are_written_in_the_node_type_and_range() {
+        let v = |kind: NodeKind, value: TagValue| kind.variant(&value);
+        assert_eq!(v(NodeKind::Int16, TagValue::Int(-300)).unwrap(), Variant::Int16(-300));
+        assert_eq!(v(NodeKind::UInt16, TagValue::F64(65535.9)).unwrap(), Variant::UInt16(65535));
+        assert_eq!(v(NodeKind::Byte, TagValue::Int(255)).unwrap(), Variant::Byte(255));
+        assert_eq!(v(NodeKind::SByte, TagValue::Bool(true)).unwrap(), Variant::SByte(1));
+        assert_eq!(v(NodeKind::Int64, TagValue::Int(i64::MAX)).unwrap(), Variant::Int64(i64::MAX));
+        assert_eq!(v(NodeKind::UInt64, TagValue::Int(7)).unwrap(), Variant::UInt64(7));
+        assert_eq!(v(NodeKind::UInt32, TagValue::Int(4_000_000_000)).unwrap(), Variant::UInt32(4_000_000_000));
+        assert_eq!(v(NodeKind::Boolean, TagValue::Int(2)).unwrap(), Variant::Boolean(true));
+        assert_eq!(v(NodeKind::Float, TagValue::Int(2)).unwrap(), Variant::Float(2.0));
+        assert_eq!(v(NodeKind::Double, TagValue::F32(0.5)).unwrap(), Variant::Double(0.5));
+        assert_eq!(v(NodeKind::String, TagValue::Int(5)).unwrap(), Variant::String(UAString::from("5")));
+        // Вне диапазона — ошибка, а не обрезка (300 в Byte записалось бы как 44).
+        let err = v(NodeKind::Byte, TagValue::Int(300)).unwrap_err().to_string();
+        assert!(err.contains("300") && err.contains("Byte") && err.contains("0…255"), "{err}");
+        assert!(v(NodeKind::UInt16, TagValue::Int(-1)).is_err());
+        assert!(v(NodeKind::UInt64, TagValue::Int(-1)).is_err());
+        assert!(v(NodeKind::Int16, TagValue::F64(1e12)).is_err());
+        assert!(v(NodeKind::Float, TagValue::F64(1e300)).is_err());
+        assert!(v(NodeKind::Int32, TagValue::Text("x".into())).is_err());
+        assert!(v(NodeKind::Unsupported("DateTime"), TagValue::Text("2026-10-21".into())).is_err());
+    }
+
+    /// Без типа узла — прежняя запись по dataType тега; в массив не пишем.
+    #[test]
+    fn unknown_node_type_falls_back_to_the_tag_type() {
+        let node = |kind, array| NodeInfo { id: NodeId::new(2, "x"), kind, array };
+        assert_eq!(node(None, false).variant("INT32", &TagValue::Int(5)).unwrap(), Variant::Int32(5));
+        assert_eq!(node(None, false).variant("FLOAT", &TagValue::Int(5)).unwrap(), Variant::Float(5.0));
+        assert_eq!(node(Some(NodeKind::Int16), false).variant("INT32", &TagValue::Int(5)).unwrap(), Variant::Int16(5));
+        assert!(node(Some(NodeKind::Float), true).variant("FLOAT", &TagValue::Int(5)).is_err());
+    }
+
+    /// Типы, которые по смыслу совпадают (целое с целым), конфликтом не считаются; неизвестное имя не проверяется.
+    #[test]
+    fn tag_and_node_types_conflict_only_by_meaning() {
+        assert!(!type_conflict("INT32", NodeKind::Int16));
+        assert!(!type_conflict("WORD", NodeKind::UInt16));
+        assert!(!type_conflict("FLOAT", NodeKind::Double));
+        assert!(!type_conflict("BOOLEAN", NodeKind::Boolean));
+        assert!(!type_conflict("STRING", NodeKind::String));
+        assert!(!type_conflict("MYTYPE", NodeKind::Float));
+        assert!(type_conflict("INT32", NodeKind::Float));
+        assert!(type_conflict("FLOAT", NodeKind::Int32));
+        assert!(type_conflict("BOOL", NodeKind::Byte));
+        assert!(!type_conflict("FLOAT", NodeKind::Unsupported("DateTime")));
+    }
+
+    /// Хороший статус без значения, которое можно передать, — BAD, а не `null` + GOOD.
+    #[test]
+    fn good_status_without_a_value_is_bad() {
+        let good =
+            |value: Variant| DataValue { value: Some(value), status: Some(StatusCode::Good), ..Default::default() };
+        assert_eq!(reading(&good(Variant::Float(1.5))).1, Quality::Good);
+        for v in
+            [Variant::Empty, Variant::DateTime(Box::default()), Variant::from(vec![1i32, 2]), Variant::UInt64(u64::MAX)]
+        {
+            let (value, quality, _) = reading(&good(v.clone()));
+            assert_eq!((value, quality), (None, Quality::Bad), "{v:?}");
+        }
+        assert_eq!(reading(&DataValue::default()).1, Quality::Bad);
+        assert_eq!(extract_value(&Variant::UInt64(7)), Some(TagValue::Int(7)));
+    }
+
+    #[test]
+    fn report_summary_is_capped() {
+        let report = NodeReport { unknown: (0..5).map(|i| format!("t{i}")).collect(), ..Default::default() };
+        assert!(report.has_problems());
+        let s = report.summary(2);
+        assert_eq!(s["unknownNodes"]["count"], 5);
+        assert_eq!(s["unknownNodes"]["tags"].as_array().unwrap().len(), 2);
+        assert!(!NodeReport::default().has_problems());
     }
 }

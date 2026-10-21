@@ -12,7 +12,7 @@ use crate::app::{App, TagRef};
 use crate::events::Event;
 use crate::messages::{CommandMessage, CommandResultMessage, command_age_ms};
 use crate::model::{self, Protocol, Quality, TagValue, Timestamp};
-use crate::opcua;
+use crate::opcua::{self, NodeId};
 use crate::pac::lua;
 
 /// Исход команды.
@@ -165,24 +165,29 @@ async fn write_opcua(app: &App, controller: &crate::app::ControllerHandle, w: Wr
     let Some(conn) = controller.opc_connection() else {
         return Outcome::fail("FAILED_NO_CONNECTION", "Контроллер не подключён");
     };
-    let prepared = opcua::parse_node_id(&tag.node_id).and_then(|n| Ok((n, opcua::to_variant(data_type, &value)?)));
-    let (node, variant) = match prepared {
-        Ok(p) => p,
+    let node = match conn.node(&tag.node_id) {
+        Ok(n) => n,
+        Err(e) => return Outcome::fail("REJECTED_UNKNOWN_TAG", format!("Адрес узла не разобран: {e:#}")),
+    };
+    // Тип значения — тип узла на сервере (сервер проверяет его строго); если он неизвестен — dataType тега.
+    let variant = match node.variant(data_type, &value) {
+        Ok(v) => v,
         Err(e) => {
-            return Outcome::fail("REJECTED_TYPE_MISMATCH", format!("Значение не приводится к типу тега: {e:#}"));
+            let of = if node.kind.is_some() { "узла" } else { "тега" };
+            return Outcome::fail("REJECTED_TYPE_MISMATCH", format!("Значение не приводится к типу {of}: {e:#}"));
         }
     };
     let verify = app.settings.gateway.command_verify;
     // Значение до записи нужно, чтобы отличить «запись не подействовала» от «значение и так было таким».
-    let before = if verify.is_zero() { None } else { read_back(&conn, &tag.node_id).await };
-    match conn.write(node, variant).await {
+    let before = if verify.is_zero() { None } else { read_back(&conn, &node.id).await };
+    match conn.write(node.id.clone(), variant).await {
         Ok(status) if status.is_good() => {
             info!("✍ OPC UA записано {} = {}", tag.name, value);
             controller.request_poll();
             if let Some(before) = before {
                 // Даём ПЛК применить запись: программа ПЛК обрабатывает её на своём цикле, а не мгновенно.
                 tokio::time::sleep(verify).await;
-                if let Some(after) = read_back(&conn, &tag.node_id).await
+                if let Some(after) = read_back(&conn, &node.id).await
                     && !same_value(&after, &value)
                     && same_value(&after, &before)
                 {
@@ -261,9 +266,8 @@ async fn write_pac(app: &App, controller: &crate::app::ControllerHandle, w: Writ
 }
 
 /// Текущее значение узла для проверки эффекта; ошибка чтения — «неизвестно», команду не портит.
-async fn read_back(conn: &opcua::OpcConnection, node_id: &str) -> Option<TagValue> {
-    let node = opcua::read_value_id(node_id).ok()?;
-    let values = conn.read(&[node]).await.ok()?;
+async fn read_back(conn: &opcua::OpcConnection, node: &NodeId) -> Option<TagValue> {
+    let values = conn.read(&[opcua::ReadValueId::from(node)]).await.ok()?;
     let dv = values.first()?;
     match opcua::reading(dv) {
         (Some(v), Quality::Good, _) => Some(v),
