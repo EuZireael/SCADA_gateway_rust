@@ -1,8 +1,8 @@
 //! Общее состояние процесса и состояние связи с контроллерами.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -132,6 +132,17 @@ pub struct TagRef {
     pub controller: Arc<ControllerHandle>,
 }
 
+/// Теги с номером из БД (> 0) и номер их контроллера в списке.
+fn index_by_id(controllers: &[Arc<ControllerHandle>]) -> HashMap<i64, (Arc<Tag>, usize)> {
+    let mut by_id = HashMap::new();
+    for (idx, h) in controllers.iter().enumerate() {
+        for tag in h.ctrl.tags.iter().filter(|t| t.id.get() > 0) {
+            by_id.insert(tag.id.get(), (tag.clone(), idx));
+        }
+    }
+    by_id
+}
+
 /// Состояние процесса, общее для всех задач: настройки, выходы наружу (Kafka, БД, события), контроллеры, роль в паре, скрипты.
 pub struct App {
     /// Настройки процесса.
@@ -146,6 +157,8 @@ pub struct App {
     pub telemetry: Option<TelemetrySink>,
     /// Пул БД; `None` без БД.
     pub db: Option<PgPool>,
+    /// Схема и теги в БД готовы; `false`, пока БД, недоступная при запуске, не подготовлена в фоне.
+    pub db_ready: AtomicBool,
     /// Включённые контроллеры в порядке конфигурации.
     pub controllers: Vec<Arc<ControllerHandle>>,
     /// Роль в паре горячего резерва (без резервирования — всегда активный).
@@ -154,8 +167,8 @@ pub struct App {
     pub scripts: Arc<Scripts>,
     /// Тег и номер его контроллера по имени (команды монитора).
     by_name: HashMap<String, (Arc<Tag>, usize)>,
-    /// То же по номеру в БД.
-    by_id: HashMap<i64, (Arc<Tag>, usize)>,
+    /// То же по номеру в БД; пуст, пока БД не синхронизирована (недоступна при запуске — [`App::reindex_ids`]).
+    by_id: RwLock<HashMap<i64, (Arc<Tag>, usize)>>,
     /// Момент запуска (для `uptime`).
     pub started: Instant,
 }
@@ -185,15 +198,12 @@ impl App {
         let controllers: Vec<Arc<ControllerHandle>> =
             controllers.into_iter().map(|c| Arc::new(ControllerHandle::new(c))).collect();
         let mut by_name = HashMap::new();
-        let mut by_id = HashMap::new();
         for (idx, h) in controllers.iter().enumerate() {
             for tag in &h.ctrl.tags {
                 by_name.insert(tag.name.clone(), (tag.clone(), idx));
-                if tag.id > 0 {
-                    by_id.insert(tag.id, (tag.clone(), idx));
-                }
             }
         }
+        let by_id = RwLock::new(index_by_id(&controllers));
         metrics.controllers_total.set(controllers.len() as i64);
         App {
             settings,
@@ -202,6 +212,7 @@ impl App {
             events,
             telemetry,
             db,
+            db_ready: AtomicBool::new(true),
             controllers,
             leadership,
             scripts,
@@ -218,7 +229,14 @@ impl App {
 
     /// Тег по номеру в БД (так адресует команды старый монитор); теги без БД имеют номер 0 и не находятся.
     pub fn tag_by_id(&self, id: i64) -> Option<TagRef> {
-        self.by_id.get(&id).map(|(t, i)| TagRef { tag: t.clone(), controller: self.controllers[*i].clone() })
+        let by_id = self.by_id.read().unwrap_or_else(|e| e.into_inner());
+        by_id.get(&id).map(|(t, i)| TagRef { tag: t.clone(), controller: self.controllers[*i].clone() })
+    }
+
+    /// Перестроить индекс по номеру: номера тегов появились после запуска (БД подключилась позже).
+    pub fn reindex_ids(&self) {
+        let fresh = index_by_id(&self.controllers);
+        *self.by_id.write().unwrap_or_else(|e| e.into_inner()) = fresh;
     }
 
     /// Число включённых тегов станции.
@@ -241,7 +259,7 @@ impl App {
                     "INFO",
                     format!("Связь с {} {}", h.ctrl.name, if restored { "восстановлена" } else { "установлена" }),
                 )
-                .controller(h.ctrl.id)
+                .controller(h.ctrl.id.get())
                 .details(json!({"controller": h.ctrl.name, "state": "CONNECTED",
                                 "note": if restored { "link restored" } else { "initial connect" }})),
             );
@@ -257,7 +275,7 @@ impl App {
             warn!("🔴 Потеряна связь: {} ({reason})", h.ctrl.name);
             self.events.emit(
                 Event::new("CONNECTION", "Gateway", "WARNING", format!("Потеряна связь с {}: {reason}", h.ctrl.name))
-                    .controller(h.ctrl.id)
+                    .controller(h.ctrl.id.get())
                     .details(json!({"controller": h.ctrl.name, "state": "DISCONNECTED", "reason": reason})),
             );
             self.update_connected_gauge();
@@ -285,7 +303,7 @@ mod tests {
 
     fn handle() -> ControllerHandle {
         ControllerHandle::new(Controller {
-            id: 0,
+            id: Default::default(),
             name: "T".into(),
             endpoint: "pac://127.0.0.1:1".into(),
             kind: ControllerKind::Pac,

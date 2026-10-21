@@ -1,6 +1,7 @@
 //! Доменная модель: контроллер, тег, значение, метка времени.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Serializer};
@@ -55,11 +56,28 @@ impl ControllerKind {
     }
 }
 
+/// Номер строки в БД шлюза. Проставляется синхронизацией с БД — при запуске или позже, когда БД стала доступна; до этого 0.
+/// Копии тега и контроллера делят одну ячейку: номер, полученный после запуска, сразу виден опросу, командам и истории.
+#[derive(Debug, Clone, Default)]
+pub struct DbId(Arc<AtomicI64>);
+
+impl DbId {
+    /// Номер; 0 — ещё не известен (БД выключена или не была доступна).
+    pub fn get(&self) -> i64 {
+        self.0.load(Ordering::Acquire)
+    }
+
+    /// Проставить номер (синхронизация с БД).
+    pub fn set(&self, id: i64) {
+        self.0.store(id, Ordering::Release);
+    }
+}
+
 /// Тег (канал) с адресацией и правами — неизменяемая часть конфигурации.
 #[derive(Debug, Clone)]
 pub struct Tag {
-    /// PK тега в БД шлюза (0 — работа без БД).
-    pub id: i64,
+    /// PK тега в БД шлюза (0 — работа без БД или БД ещё не была доступна).
+    pub id: DbId,
     /// Порядковый номер среди включённых тегов контроллера: по нему обработчик хранит состояние
     /// тега (качество, последнее опубликованное значение…) вектором, а не хеш-таблицей по имени.
     pub slot: usize,
@@ -110,7 +128,7 @@ impl Tag {
     pub fn from_config(cfg: &TagConfig) -> Self {
         let protocol_raw = cfg.protocol.clone().unwrap_or_else(|| "opcua".into());
         Tag {
-            id: 0,
+            id: DbId::default(),
             slot: 0,
             name: cfg.name.clone(),
             node_id: cfg.node_id.clone(),
@@ -255,8 +273,8 @@ impl OpcSecurity {
 /// Контроллер со своими тегами.
 #[derive(Debug, Clone)]
 pub struct Controller {
-    /// PK контроллера в БД шлюза (0 — работа без БД).
-    pub id: i64,
+    /// PK контроллера в БД шлюза (0 — работа без БД или БД ещё не была доступна).
+    pub id: DbId,
     /// Уникальное имя контроллера (ключ строки в таблице `controllers`).
     pub name: String,
     /// Адрес со схемой (`opc.tcp://`, `modbus://`, `pac://`).
@@ -275,7 +293,7 @@ impl Controller {
     /// Контроллер из записи YAML; `None`, если схема адреса неизвестна. Берутся только включённые теги, каждому присваивается слот.
     pub fn from_config(cfg: &ServerConfig) -> Option<Self> {
         Some(Controller {
-            id: 0,
+            id: DbId::default(),
             name: cfg.name.clone(),
             endpoint: cfg.endpoint.clone(),
             kind: ControllerKind::from_endpoint(&cfg.endpoint)?,

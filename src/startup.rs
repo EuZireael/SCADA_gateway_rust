@@ -28,6 +28,10 @@ use crate::{http, poller};
 
 /// Сколько ждём остановки задач после сигнала.
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
+/// Пауза между попытками подготовить БД, недоступную при запуске.
+const DB_RETRY: Duration = Duration::from_secs(5);
+/// Не чаще — предупреждение «БД всё ещё недоступна».
+const DB_RETRY_LOG_EVERY: Duration = Duration::from_secs(300);
 /// Окно дублей команд: повторная доставка того же `commandId` не пишет в ПЛК дважды.
 const DEDUP_TTL: Duration = Duration::from_secs(60);
 /// Сколько последних идентификаторов команд помнить.
@@ -50,8 +54,18 @@ pub fn init_tracing() {
 pub struct Station {
     /// Только включённые контроллеры; id тегов — из БД, если она есть.
     pub controllers: Vec<Controller>,
-    /// Пул БД; `None` при `DB_ENABLED=false`.
+    /// Пул БД; `None` при `DB_ENABLED=false`. Есть и тогда, когда сервер при запуске был недоступен.
     pub db: Option<PgPool>,
+    /// БД была недоступна при запуске: подготовить её в фоне ([`spawn_db_sync`]).
+    pub pending_db: Option<PendingDb>,
+}
+
+/// Подготовка БД, отложенная до её появления: все контроллеры YAML (и выключенные — их строки в БД сохраняются) и имена.
+/// Теги и контроллеры — копии тех, что работают в шлюзе, с теми же ячейками номеров: номера после синхронизации сразу
+/// видны опросу, командам и истории.
+pub struct PendingDb {
+    controllers: Vec<Controller>,
+    yaml_names: Vec<String>,
 }
 
 /// Прочитать `controllers.yaml`, синхронизировать теги с БД (id нужны командам и истории) и оставить включённые
@@ -66,21 +80,76 @@ pub async fn load_station(settings: &Settings) -> Result<Station> {
             None => warn!("Неизвестный протокол контроллера {}: {}", s.name, s.endpoint),
         }
     }
-    let db = match &settings.db {
+    // БД не на горячем пути: если она недоступна при запуске (сеть, сервер ещё стартует), шлюз запускается без неё и
+    // готовит её в фоне. Неверный пароль, сертификат, ошибка миграции повтором не лечатся — отказ запуска, как раньше.
+    let (db, pending_db) = match &settings.db {
         Some(db_settings) => {
-            let pool = crate::db::connect(db_settings).await?;
-            crate::db::sync_config(&pool, &mut controllers, &yaml_names).await.context("синхронизация с YAML")?;
-            Some(pool)
+            let pool = crate::db::pool(db_settings);
+            let target = format!("{}:{}/{}", db_settings.host, db_settings.port, db_settings.database);
+            match crate::db::prepare(&pool, &controllers, &yaml_names).await {
+                Ok(()) => {
+                    info!("БД {target} подключена");
+                    (Some(pool), None)
+                }
+                Err(crate::db::PrepareError::Unavailable(e)) => {
+                    warn!(
+                        "БД {target} недоступна при запуске ({e}) — шлюз запускается без неё: телеметрия и команды \
+                         работают, события и история не пишутся, команды по tagId — после синхронизации (по имени — \
+                         сразу). Подключение — в фоне, каждые {} с",
+                        DB_RETRY.as_secs()
+                    );
+                    (Some(pool), Some(PendingDb { controllers: controllers.clone(), yaml_names }))
+                }
+                Err(crate::db::PrepareError::Failed(e)) => return Err(e),
+            }
         }
         None => {
             warn!("БД выключена (DB_ENABLED=false): журнал и история не пишутся");
-            None
+            (None, None)
         }
     };
     let enabled: Vec<Controller> = controllers.into_iter().filter(|c| c.enabled).collect();
     let tag_count: usize = enabled.iter().map(|c| c.tags.len()).sum();
     info!("Загружено {} контроллеров, {tag_count} тегов", enabled.len());
-    Ok(Station { controllers: enabled, db })
+    Ok(Station { controllers: enabled, db, pending_db })
+}
+
+/// БД, недоступная при запуске: ждать её в фоне, затем миграции и синхронизация конфигурации; номера тегов — в работающий
+/// шлюз (индекс команд по `tagId` — заново), событие `SYSTEM`. Ошибку, которая сама не пройдёт, показываем и повторяем
+/// реже — шлюз из-за БД не останавливается.
+pub fn spawn_db_sync(app: &Arc<App>, pending: PendingDb, tasks: &mut Tasks) {
+    let Some(pool) = app.db.clone() else { return };
+    app.db_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+    let (app, cancel) = (app.clone(), tasks.cancel.clone());
+    tasks.spawn(async move {
+        let started = std::time::Instant::now();
+        let mut last_log: Option<std::time::Instant> = None;
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(DB_RETRY) => {}
+            }
+            match crate::db::prepare(&pool, &pending.controllers, &pending.yaml_names).await {
+                Ok(()) => {
+                    app.reindex_ids();
+                    app.db_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let message = format!(
+                        "БД подключена через {} с после запуска: схема и конфигурация синхронизированы",
+                        started.elapsed().as_secs()
+                    );
+                    info!("🗄 {message}");
+                    app.events.emit(events::Event::new("SYSTEM", "Gateway", "INFO", message));
+                    return;
+                }
+                Err(e) => {
+                    if last_log.is_none_or(|t| t.elapsed() >= DB_RETRY_LOG_EVERY) {
+                        warn!("БД всё ещё не подготовлена ({e}) — повтор каждые {} с", DB_RETRY.as_secs());
+                        last_log = Some(std::time::Instant::now());
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Роль экземпляра: одиночный (активен всегда) или резервируемый (роль решают выборы через Kafka).
