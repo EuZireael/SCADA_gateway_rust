@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::app::App;
-use crate::command::{self, Dedup};
+use crate::command::{self, Dedup, Dispatcher};
 use crate::config::{self, Settings};
 use crate::events::{self, EventSink};
 use crate::kafka::{self, KafkaOut};
@@ -191,23 +191,39 @@ pub fn spawn_pollers(app: &Arc<App>, tasks: &mut Tasks) {
     tasks.supervise("heartbeat", move || poller::heartbeat(beat_app.clone(), cancel.clone()));
 }
 
-/// Приём команд из Kafka (если Kafka включена).
+/// Приём команд из Kafka (если Kafka включена) и исполнители очередей команд по контроллерам.
 pub fn spawn_commands(app: &Arc<App>, leadership: &Arc<Leadership>, tasks: &mut Tasks) {
     if app.kafka.is_none() {
         return;
     }
     // Один `Dedup` на все перезапуски задачи: после падения консьюмера повтор команды всё равно будет отброшен.
     let dedup = Arc::new(Dedup::new(DEDUP_TTL, DEDUP_MAX));
+    // Очередь и исполнитель на каждый контроллер: консьюмер только раскладывает команды, не дожидаясь записи.
+    let queues = Arc::new(Dispatcher::new(app.controllers.iter().map(|c| c.ctrl.name.as_str()), &app.metrics));
+    for name in app.controllers.iter().map(|c| c.ctrl.name.clone()) {
+        let (app, queues, cancel) = (app.clone(), queues.clone(), tasks.cancel.clone());
+        tasks.supervise(&format!("команды {name}"), move || {
+            let (app, queues, cancel, name) = (app.clone(), queues.clone(), cancel.clone(), name.clone());
+            async move {
+                queues
+                    .run(&name, &cancel, |job| {
+                        let app = app.clone();
+                        async move { command::process(&app, job).await }
+                    })
+                    .await
+            }
+        });
+    }
     let (app, leadership, cancel) = (app.clone(), leadership.clone(), tasks.cancel.clone());
     tasks.supervise("команды", move || {
-        let (app, dedup) = (app.clone(), dedup.clone());
+        let (app, dedup, queues) = (app.clone(), dedup.clone(), queues.clone());
         kafka::consume_commands(
             app.settings.kafka.clone(),
             leadership.clone(),
             cancel.clone(),
             move |cmd, record_ts| {
-                let (app, dedup) = (app.clone(), dedup.clone());
-                async move { command::handle(&app, &dedup, cmd, record_ts).await }
+                command::submit(&app, &dedup, &queues, cmd, record_ts);
+                std::future::ready(())
             },
         )
     });

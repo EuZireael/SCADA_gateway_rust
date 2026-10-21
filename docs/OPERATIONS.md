@@ -108,7 +108,9 @@ docker run -d --name scada-gateway -p 8888:8888 \
 
 `GATEWAY_COMMANDS_MAX_AGE_MS` (30000): команда старше (по метке записи Kafka, иначе по `timestamp` в теле)
 не исполняется — `REJECTED_EXPIRED`. Команды исполняются «не более одного раза»: позиция коммитится до
-исполнения, повтор того же `commandId` отбрасывается.
+исполнения, повтор того же `commandId` отбрасывается. У каждого контроллера своя очередь команд: контроллер, который
+не отвечает на запись, задерживает только свои команды; команды одного контроллера исполняются по одной в порядке
+топика. Результаты разных контроллеров могут прийти не в порядке отправки (монитор сопоставляет их по `commandId`).
 
 | Статус результата | Когда |
 |---|---|
@@ -166,6 +168,7 @@ docker run -d --name scada-gateway -p 8888:8888 \
 | `scada_poll_seconds`, `scada_poll_overruns_total` | цикл опроса; **overruns > 0 — шлюз не успевает за периодом** |
 | `scada_process_seconds` | обработка цикла (скрипты, фильтры, алармы) |
 | `scada_commands_total{status}` | команды по исходу |
+| `scada_command_queue{controller}`, `scada_command_wait_seconds{controller}` | команд в очереди контроллера и сколько команда ждала в ней; растут — контроллер не успевает или не отвечает на запись, хвост очереди получит `REJECTED_EXPIRED` |
 | `scada_task_restarts_total{task}` | **задача шлюза падала и перезапущена** — смотрите журнал и события SYSTEM/ERROR |
 | `scada_db_write_errors_total{kind}`, `scada_db_rows_lost_total{kind}` | БД недоступна: ошибки записи и потерянные строки (events, history) |
 | `scada_events_dropped_total`, `scada_telemetry_rows_dropped_total` | очередь записи переполнена, строки отброшены |
