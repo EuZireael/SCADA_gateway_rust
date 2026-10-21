@@ -78,6 +78,7 @@ docker run --rm -p 8888:8888 -v $PWD/controllers.yaml:/app/config/controllers.ya
 | Связь | `GET /actuator/health` | контроллер `UP` в течение 30 с |
 | Журнал | `docker logs` | `связь установлена`, нет повторяющихся `Потеряна связь` |
 | Метрики | `GET /actuator/prometheus` | `scada_controllers_connected` = `scada_controllers_total`; `scada_task_restarts_total` отсутствует |
+| Узлы OPC UA | `GET /api/status`, поле `opcua` контроллера | `unknownNodes`, `unsupportedNodes`, `unresolved` пусты, `typeMismatch` пуст или понятен; иначе — список тегов там же и в журнале (`docs/TROUBLESHOOTING.md`, «OPC UA: проверка узлов при подключении») |
 | Качество | считать `scada.tags` (команда ниже) | у большинства тегов `"quality":"GOOD"`; доля `BAD` понятна (тег выключен в ПЛК или не существует) |
 | Значения | сверить 5–10 тегов с панелью ПЛК или инженерным ПО | числа совпадают, типы верны (целое — целое, вещественное — вещественное) |
 

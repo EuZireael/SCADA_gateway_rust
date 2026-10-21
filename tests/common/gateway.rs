@@ -171,6 +171,11 @@ impl Gateway {
         }
     }
 
+    /// Журнал шлюза целиком.
+    pub fn log(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
     /// Последние строки журнала шлюза — для сообщений об ошибках.
     pub fn log_tail(&self) -> String {
         let text = std::fs::read_to_string(&self.log).unwrap_or_default();

@@ -58,7 +58,7 @@ curl localhost:8888/actuator/health
 
 | Уровень | Команда | Что нужно | Что проверяет |
 |---|---|---|---|
-| **Юнит** | `cargo test` | ничего | фильтр «по исключению», команды, конфигурация и её проверка, песочница и скрипты, HA-логика, формат сообщений, сверка `controllers.yaml` ↔ конфигурация симулятора |
+| **Юнит** | `cargo test` | ничего | фильтр «по исключению», команды, конфигурация и её проверка, песочница и скрипты, HA-логика, формат сообщений, сверка `controllers.yaml` ↔ конфигурация симулятора; `tests/opcua_server.rs` — клиент OPC UA против сервера в том же процессе (строгая проверка типа записи, предел `MaxNodesPerRead`, неизвестные узлы, `nsu=`) |
 | **Интеграционные** | `cargo test -- --ignored` | симулятор, Kafka, (Postgres) | клиенты протоколов, шлюз целиком глазами монитора, обрыв связи через TCP-прокси, горячий резерв (`kill -9`), REST под токеном, защищённый OPC UA, проверка эффекта записи, TLS к БД |
 | **Стенд** | `scripts/stack_smoke.sh` | docker compose | `docker compose` из исходников и сбои: пропали Kafka, БД, ПЛК |
 | **Сравнение протоколов** | `scripts/compare_protocols.py` | docker, прошивка ptusa (`--source firmware`) или симулятор | EasyDriver (PAC) и OPC UA на одной станции: охват, нагрузка, запись, обрыв; `docs/PROTOCOL_COMPARISON.md` |
@@ -99,6 +99,9 @@ IT_DATABASE_TLS_CA=target/pg-tls/ca.crt` (`tests/db_tls.rs`). Симулятор
   (`tests/common/gateway.rs`), его журнал — `/tmp/scada-gateway-it-*.log`.
 * Проверка на настоящей прошивке — ручная: эмулятор ptusa (`scripts/ptusa_emulator.sh`, `docker-compose.moika.yml`,
   `up-moika.sh`); в CI его нет: нужны проект ПЛК и подмодуль с прошивкой, которых в репозитории шлюза нет.
+* **Сервер `async-opcua` (симулятор, фасад ptusa-opcua) не проверяет тип записи** в скалярный узел: `Int16` в узел
+  `Int32` он примет, настоящий ПЛК ответит `BadTypeMismatch`. Тест записи с неверным типом на симуляторе зелёный и
+  ничего не доказывает; строгий сервер — в `tests/opcua_server.rs` (проверка в обработчике записи).
 
 ## CI/CD
 
@@ -158,7 +161,7 @@ push/PR и раз в неделю. Исключения (с обосновани
 
 `app.events.emit(Event::new("ТИП", "Источник", "INFO|WARNING|ERROR|CRITICAL", "сообщение").details(json!({…})))`. Событие
 попадёт в `event_log`, в Kafka `scada-events` (если экземпляр активный) и в REST. Типы сейчас: `CONNECTION`,
-`QUALITY_CHANGE`, `COMMAND`, `ALARM`, `ALARM_CLEARED`, `HEARTBEAT`, `SCRIPT`, `SYSTEM`, `HA`.
+`QUALITY_CHANGE`, `COMMAND`, `ALARM`, `ALARM_CLEARED`, `HEARTBEAT`, `SCRIPT`, `SYSTEM`, `HA`, `CONFIG`.
 
 ### …метрику
 
