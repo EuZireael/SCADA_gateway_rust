@@ -21,7 +21,8 @@ use crate::events::{self, EventSink};
 use crate::kafka::{self, KafkaOut};
 use crate::leadership::Leadership;
 use crate::metrics::Metrics;
-use crate::model::Controller;
+use crate::model::{Controller, ControllerKind};
+use crate::opcua_cert;
 use crate::supervisor::supervise;
 use crate::tag_settings::{self, TagSettingsStore};
 use crate::{http, poller};
@@ -156,6 +157,39 @@ impl Tasks {
             warn!("Не все задачи остановились за {} с", STOP_TIMEOUT.as_secs());
         }
     }
+}
+
+/// Сертификат OPC UA-клиента (если есть контроллеры OPC UA): выпустить или прочитать при запуске и следить за сроком.
+/// Сертификат, заданный настройкой, или нужный защищённому каналу, но негодный — ошибка запуска; без защищённых каналов
+/// — предупреждение (канал None работает и без сертификата).
+pub async fn spawn_opcua_cert(
+    settings: &Settings,
+    controllers: &[Controller],
+    metrics: &Arc<Metrics>,
+    events: &EventSink,
+    tasks: &mut Tasks,
+) -> Result<()> {
+    let opcua: Vec<&Controller> = controllers.iter().filter(|c| c.kind == ControllerKind::OpcUa).collect();
+    if opcua.is_empty() {
+        return Ok(());
+    }
+    let cert_settings = settings.gateway.opcua_cert.clone();
+    let check = cert_settings.clone();
+    match tokio::task::spawn_blocking(move || opcua_cert::ensure(&check)).await? {
+        Ok(cert) => info!("🔐 {}", opcua_cert::describe(&cert, chrono::Utc::now())),
+        Err(e) if cert_settings.own.is_some() || opcua.iter().any(|c| c.opc_security.is_secure()) => {
+            return Err(e.context("сертификат OPC UA-клиента"));
+        }
+        Err(e) => {
+            warn!("Сертификат OPC UA-клиента недоступен ({e:#}); защищённый канал без него не работает");
+            return Ok(());
+        }
+    }
+    let (metrics, events, cancel) = (metrics.clone(), events.clone(), tasks.cancel.clone());
+    tasks.supervise("сертификат OPC UA", move || {
+        opcua_cert::watch(cert_settings.clone(), metrics.clone(), events.clone(), cancel.clone())
+    });
+    Ok(())
 }
 
 /// Писатель истории телеметрии в БД (если БД есть и история включена); возвращает приёмник строк для `App`.

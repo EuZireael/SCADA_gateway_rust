@@ -34,3 +34,11 @@ tempfile = "3.27.0"
 [profile.release]
 strip = true
 lto = "thin"
+
+# Генерация RSA-ключа (сертификат OPC UA-клиента, тестовые серверы) без оптимизации идёт секунды на ключ: тесты
+# сертификатов шли 45 с. Оптимизируется только арифметика RSA, остальной код отлаживается как обычно.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3

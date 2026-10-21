@@ -76,7 +76,9 @@ sequenceDiagram
     Note over S: controllers.yaml → проверка → подключение к БД и синхронизация тегов (id нужны командам и истории)
     M->>S: build_leadership, build_kafka
     Note over S: роль (одиночный/пара), продюсер Kafka, создание топиков
-    M->>M: писатель событий, Scripts::load, App::new
+    M->>S: писатель событий, spawn_opcua_cert
+    Note over S: сертификат OPC UA-клиента: выпустить или прочитать, проверить ключ и URI, следить за сроком
+    M->>M: Scripts::load, App::new
     Note over M: ошибка скрипта при старте — ошибка старта
     M->>S: spawn_pollers, spawn_commands, spawn_http
     M->>M: ждать SIGTERM / Ctrl-C
