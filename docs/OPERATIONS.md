@@ -56,8 +56,8 @@ docker run -d --name scada-gateway -p 8888:8888 \
 | `KAFKA_CLIENT_<СВОЙСТВО>` | — | любое свойство librdkafka: `KAFKA_CLIENT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM=none` |
 | `SPRING_KAFKA_PROPERTIES_SECURITY_PROTOCOL`, `…_SASL_MECHANISM`, `…_SASL_JAAS_CONFIG` | — | как у Java-шлюза (из JAAS берутся `username` и `password`) |
 
-Пароли в журнал не попадают. Команды читаются группой `scada-gateway-group` с ручным назначением
-партиций; брокеру для горячего резерва нужен `group.min.session.timeout.ms` ≤ `GATEWAY_HA_SESSION_TIMEOUT_MS`.
+Пароли в журнал не попадают. Команды читаются с ручным назначением партиций, позиция хранится в группе
+`GATEWAY_COMMANDS_GROUP_ID` (`scada-gateway-group`); брокеру для горячего резерва нужен `group.min.session.timeout.ms` ≤ `GATEWAY_HA_SESSION_TIMEOUT_MS`.
 
 ### База данных
 
@@ -137,6 +137,40 @@ docker run -d --name scada-gateway -p 8888:8888 \
 роль партнёру (если тот в группе) и не отбирает её обратно; 0 — выключено. Новый активный сразу
 отправляет значения всех тегов. Состояние — `GET /api/ha`, метрика `scada_ha_active`, события `HA`.
 
+### Несколько станций на одном Kafka
+
+У каждой станции — **свой топик команд** (`KAFKA_TOPICS_COMMANDS`): монитор шлёт команду в топик той станции, которой
+принадлежит тег. От топика команд по умолчанию зависит группа выборов (`scada-gateway-ha.<топик команд>`), поэтому
+у каждой пары оказывается своя группа и свой активный. Остальные топики (телеметрия, результаты, события, алармы)
+можно оставить общими: ключ сообщения — полный путь тега с площадкой и проектом, он не повторяется между станциями.
+
+```sh
+# Станция BN1_MCA1, оба экземпляра пары (у второго — свой GATEWAY_HA_INSTANCE_ID)
+KAFKA_TOPICS_COMMANDS=scada-commands.BN1_MCA1
+GATEWAY_HA_ENABLED=true
+GATEWAY_HA_INSTANCE_ID=mca1-a
+# Станция BN1_NORM_TANKS
+KAFKA_TOPICS_COMMANDS=scada-commands.BN1_NORM_TANKS
+GATEWAY_HA_ENABLED=true
+GATEWAY_HA_INSTANCE_ID=tanks-a
+```
+
+Служебный топик выборов `scada-gateway-ha` может быть общим: у каждой группы своё назначение его партиции. Группа
+позиций команд `scada-gateway-group` тоже может быть общей (позиция хранится по топику); свою (`GATEWAY_COMMANDS_GROUP_ID`)
+задают, чтобы развести права. ACL пользователя станции: `Write` в топики телеметрии, результатов, событий и алармов;
+`Read` своего топика команд, `scada-gateway-ha` и `channel.tag-settings`; `Read` и `Describe` своих групп — выборов
+и позиций команд. Шлюз сам создаёт недостающие топики; без права `Create` их создают заранее (топик выборов — с одной
+партицией).
+
+**Защита от смешения.** Если две станции всё же оказались в одной группе выборов (общий топик команд по умолчанию или
+одинаковый `GATEWAY_HA_GROUP_ID`), активный был бы один на всех, и телеметрия остальных станций молча остановилась бы.
+Поэтому экземпляр сообщает свою станцию в группе (отметка по именам контроллеров в `client.id` консьюмера выборов) и **не
+вступает в группу, где уже есть экземпляры другой станции**: работающая станция остаётся активной, а новый экземпляр
+остаётся в резерве и проверяет группу снова раз в 30 с. В журнале — ошибка `В группе выборов … экземпляры другой
+станции: <экземпляр>@<хост>`, событие `HA`/`ERROR`, метрика `scada_ha_foreign_members` > 0, поле `foreignMembers` в
+`/api/ha`. Экземпляры одной станции считаются своими, пока у них есть хотя бы один общий контроллер, — пара с чуть
+разными конфигурациями (обновление по одному) друг друга не отвергает.
+
 ### Скрипты Lua
 
 `GATEWAY_SCRIPTS_DIR` (`scripts`), `GATEWAY_SCRIPTS_TIMEOUT_MS` (50 на вызов), `GATEWAY_SCRIPTS_RELOAD_INTERVAL_MS`
@@ -170,12 +204,13 @@ docker run -d --name scada-gateway -p 8888:8888 \
 | `scada_db_write_errors_total{kind}`, `scada_db_rows_lost_total{kind}` | БД недоступна: ошибки записи и потерянные строки (events, history) |
 | `scada_events_dropped_total`, `scada_telemetry_rows_dropped_total` | очередь записи переполнена, строки отброшены |
 | `scada_ha_active{instance}` | 1 — активный, 0 — резерв |
+| `scada_ha_foreign_members` | **экземпляров другой станции в группе выборов**; не 0 — станции на одном Kafka не разведены |
 | `scada_script_errors_total{script}`, `scada_scripts_bound_tags` | скрипты |
 
 Рекомендуемые оповещения: `increase(scada_poll_overruns_total[5m]) > 0`; `scada_controllers_connected <
 scada_controllers_total` дольше N минут; `increase(scada_task_restarts_total[10m]) > 0`;
 `increase(scada_kafka_send_errors_total[5m]) > 0`; `increase(scada_db_rows_lost_total[5m]) > 0`;
-`sum(scada_ha_active) != 1` для пары (оба активны или оба в резерве).
+`sum(scada_ha_active) != 1` для пары (оба активны или оба в резерве); `scada_ha_foreign_members > 0`.
 
 Первый запуск на реальном оборудовании — по ступеням, `docs/PILOT_CHECKLIST.md`.
 
