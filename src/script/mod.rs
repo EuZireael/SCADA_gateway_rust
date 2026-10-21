@@ -492,6 +492,8 @@ mod tests {
             unit: Some("°C".into()),
             min_value: None,
             max_value: None,
+            write_min: None,
+            write_max: None,
             modbus_address: None,
             modbus_type: None,
             modbus_unit_id: None,

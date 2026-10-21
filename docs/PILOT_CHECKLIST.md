@@ -149,6 +149,7 @@ kafka-console-consumer.sh --bootstrap-server БРОКЕР --topic pilot-command-
 | `FAILED_NOT_APPLIED` | принял, но значение не изменилось (программа не разрешает действие); для PAC этот статус недоступен — код 0 значит «принято», проверять по значению |
 | `REJECTED_NOT_WRITABLE` | тег не `writable` или это Modbus (Modbus не пишется никогда) |
 | `REJECTED_TYPE_MISMATCH` | значение не приводится к типу тега |
+| `REJECTED_OUT_OF_RANGE` | значение вне `writeMin`/`writeMax` тега — в ПЛК не ушло |
 | `REJECTED_EXPIRED` | команда старше `GATEWAY_COMMANDS_MAX_AGE_MS`: проверьте часы |
 | `FAILED_NO_CONNECTION`, `FAILED_WRITE` | связи нет или сервер отклонил запись; подробности в `message` и журнале |
 

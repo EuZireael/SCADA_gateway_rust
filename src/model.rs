@@ -93,6 +93,10 @@ pub struct Tag {
     pub min_value: Option<f64>,
     /// Верхний предел для аларма.
     pub max_value: Option<f64>,
+    /// Пределы значения команды, включительно (`writeMin`/`writeMax`); в единицах оператора, до скрипта канала.
+    pub write_min: Option<f64>,
+    /// Верхний предел значения команды, включительно.
+    pub write_max: Option<f64>,
     /// Адрес holding-регистра в нотации 4xxxx (40001…); только Modbus.
     pub modbus_address: Option<i32>,
     /// Тип регистра из YAML (справочно, пишется в БД; декодирование идёт по `data_type`).
@@ -127,6 +131,8 @@ impl Tag {
             unit: cfg.unit.clone(),
             min_value: cfg.min_value,
             max_value: cfg.max_value,
+            write_min: cfg.write_min,
+            write_max: cfg.write_max,
             modbus_address: cfg.modbus_address,
             modbus_type: cfg.modbus_type.clone(),
             modbus_unit_id: cfg.modbus_unit_id.unwrap_or(1),
@@ -529,6 +535,8 @@ mod tests {
             unit: None,
             min_value: None,
             max_value: None,
+            write_min: None,
+            write_max: None,
             modbus_address: None,
             modbus_type: None,
             modbus_unit_id: None,

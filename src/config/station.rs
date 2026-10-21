@@ -102,6 +102,10 @@ pub struct TagConfig {
     pub min_value: Option<f64>,
     /// Верхний предел для аларма.
     pub max_value: Option<f64>,
+    /// Наименьшее значение, которое можно записать командой (включительно); меньшее — `REJECTED_OUT_OF_RANGE`.
+    pub write_min: Option<f64>,
+    /// Наибольшее значение, которое можно записать командой (включительно).
+    pub write_max: Option<f64>,
     /// Адрес holding-регистра 4xxxx (40001…105536); обязателен у Modbus-тега.
     pub modbus_address: Option<i32>,
     /// Тип регистра (справочно).
@@ -212,6 +216,7 @@ fn check_tags(server: &ServerConfig, problems: &mut Vec<String>) {
         if !node_ids.insert(tag.node_id.as_str()) {
             problems.push(format!("{who}: nodeId {:?} уже занят другим тегом контроллера", tag.node_id));
         }
+        check_write_limits(tag, &who, problems);
         match protocol {
             Protocol::Pac => {
                 for (what, value) in [("deviceName", &tag.device_name), ("fieldName", &tag.field_name)] {
@@ -242,6 +247,32 @@ fn check_tags(server: &ServerConfig, problems: &mut Vec<String>) {
             "контроллер {:?}: у тегов разные modbusUnitId {modbus_units:?} — шлюз читает контроллер с одним",
             server.name
         ));
+    }
+}
+
+/// Пределы записи тега: конечные числа, нижний не больше верхнего, тег числовой. Пределы у строки или логического
+/// тега не проверялись бы — отказ запуска лучше видимости защиты.
+fn check_write_limits(tag: &TagConfig, who: &str, problems: &mut Vec<String>) {
+    if tag.write_min.is_none() && tag.write_max.is_none() {
+        return;
+    }
+    if !crate::model::is_int(&tag.data_type) && !crate::model::is_float(&tag.data_type) {
+        problems.push(format!(
+            "{who}: writeMin/writeMax задаются только у числового тега (INT…, FLOAT…, REAL…, DOUBLE…), dataType {:?}",
+            tag.data_type
+        ));
+        return;
+    }
+    for (what, value) in [("writeMin", tag.write_min), ("writeMax", tag.write_max)] {
+        if let Some(v) = value.filter(|v| !v.is_finite()) {
+            problems.push(format!("{who}: {what} {v} — не конечное число"));
+            return;
+        }
+    }
+    if let (Some(lo), Some(hi)) = (tag.write_min, tag.write_max)
+        && lo > hi
+    {
+        problems.push(format!("{who}: writeMin {lo} больше writeMax {hi}"));
     }
 }
 
