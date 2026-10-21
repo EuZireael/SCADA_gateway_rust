@@ -16,6 +16,11 @@ on:
 permissions:
   contents: read
 
+# Имя образа в GHCR — явно, а не из имени репозитория: после переименования репозитория (SCADA_rust →
+# SCADA_gateway_rust) образ остался прежним, у тех, кто его тянет, ничего не меняется. Только строчные буквы.
+env:
+  IMAGE: ghcr.io/euzireael/scada_rust
+
 jobs:
   check:
     name: Rust fmt, clippy & test
@@ -225,11 +230,10 @@ jobs:
       #   main       → :latest (+ :<sha>)
       #   тег vX.Y.Z → :vX.Y.Z (+ :<sha>)
       #   PR         → :ci-<sha> (не публикуется)
-      # Имя в GHCR — только строчными (EuZireael/SCADA_rust → euzireael/scada_rust).
+      # Имя образа — env.IMAGE в начале файла.
       - name: Compute image tags
         id: meta
         run: |
-          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           case "${{ github.ref }}" in
             refs/heads/main) TAGS="$IMAGE:latest $IMAGE:${{ github.sha }}" ;;
             refs/tags/v*)    TAGS="$IMAGE:${{ github.ref_name }} $IMAGE:${{ github.sha }}" ;;
@@ -268,7 +272,6 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           awk -v v="$VERSION" 'index($0, "## [" v "]") == 1 {on=1; next} on && /^## \[/ {exit} on' CHANGELOG.md > notes.md
           grep -q '[^[:space:]]' notes.md || { echo "::error::в CHANGELOG.md нет раздела [$VERSION]"; exit 1; }
-          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
           { echo; echo '---'; echo; echo "Образ: \`docker pull $IMAGE:$GITHUB_REF_NAME\`"; } >> notes.md
 
       - name: Create release
