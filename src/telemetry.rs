@@ -303,7 +303,8 @@ impl AlarmEvaluator {
                 if self.active.get(&tag.name).is_some_and(|a| a.condition == condition) {
                     return None; // то же нарушение — молчим (анти-флуд)
                 }
-                let alarm_id = format!("ALARM_{}_{}_{}", tag.id.get(), condition, chrono::Utc::now().timestamp_millis());
+                let alarm_id =
+                    format!("ALARM_{}_{}_{}", tag.id.get(), condition, chrono::Utc::now().timestamp_millis());
                 let previous = self.active.insert(
                     tag.name.clone(),
                     ActiveAlarm { condition, alarm_id: alarm_id.clone(), severity, threshold },
