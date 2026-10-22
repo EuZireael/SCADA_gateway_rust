@@ -180,6 +180,13 @@ pub async fn build_kafka(
     if !settings.kafka.client.0.is_empty() {
         info!("🔐 Kafka: {}", settings.kafka.client.summary());
     }
+    let ignored = settings.kafka.client.ignored();
+    if !ignored.is_empty() {
+        warn!(
+            "KAFKA_CLIENT_*: {} шлюз задаёт сам, значение из окружения не применяется (docs/CONFIGURATION.md)",
+            ignored.join(", ")
+        );
+    }
     Ok(Some(Arc::new(KafkaOut::new(&settings.kafka, metrics.clone(), leadership.clone())?)))
 }
 
