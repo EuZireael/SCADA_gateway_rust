@@ -15,10 +15,11 @@ use sqlx::{FromRow, Row};
 use tracing::{info, warn};
 
 use crate::config::{DbSettings, DbSsl};
-use crate::model::{Controller, Tag, TagValue};
+use crate::model::{Controller, DbId, Tag, TagValue};
 
-/// Подключиться к БД (ждёт до минуты, пока сервер поднимется; неверный пароль и сертификат показывает сразу) и применить миграции схемы.
-pub async fn connect(settings: &DbSettings) -> Result<PgPool> {
+/// Пул БД. Соединения открываются по требованию: пул есть, даже если сервер недоступен, — запись событий и истории
+/// просто не проходит (со счётчиком потерь), пока он не вернётся. Схему и конфигурацию готовит [`prepare`].
+pub fn pool(settings: &DbSettings) -> PgPool {
     let mut options = PgConnectOptions::new()
         .host(&settings.host)
         .port(settings.port)
@@ -44,27 +45,45 @@ pub async fn connect(settings: &DbSettings) -> Result<PgPool> {
             settings.ssl
         );
     }
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        match PgPoolOptions::new()
-            .max_connections(8)
-            .acquire_timeout(Duration::from_secs(10))
-            .connect_with(options.clone())
-            .await
-        {
-            Ok(pool) => {
-                sqlx::migrate!("./migrations").run(&pool).await.context("миграция схемы")?;
-                info!("БД {}:{}/{} подключена", settings.host, settings.port, settings.database);
-                return Ok(pool);
-            }
-            Err(e) if is_transient(&e) && attempt < 30 => {
-                warn!("БД недоступна (попытка {attempt}/30): {e}");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            Err(e) => return Err(e).context("БД недоступна"),
+    PgPoolOptions::new().max_connections(8).acquire_timeout(Duration::from_secs(10)).connect_lazy_with(options)
+}
+
+/// Подключиться и применить миграции схемы, без синхронизации конфигурации; неверный пароль и сертификат — ошибка сразу.
+pub async fn connect(settings: &DbSettings) -> Result<PgPool> {
+    let pool = pool(settings);
+    pool.acquire().await.context("БД недоступна")?;
+    sqlx::migrate!("./migrations").run(&pool).await.context("миграция схемы")?;
+    Ok(pool)
+}
+
+/// Почему БД не подготовлена.
+#[derive(Debug)]
+pub enum PrepareError {
+    /// Сервер недоступен (нет сети, ещё стартует) — пройдёт само, повторяем.
+    Unavailable(sqlx::Error),
+    /// Неверный пароль, непроверяемый сертификат, ошибка миграции — повтор не поможет.
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for PrepareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrepareError::Unavailable(e) => write!(f, "БД недоступна: {e}"),
+            PrepareError::Failed(e) => write!(f, "{e:#}"),
         }
     }
+}
+
+/// Подготовить БД: дождаться соединения (не дольше таймаута пула, 10 с), применить миграции схемы и синхронизировать
+/// конфигурацию (номера — в теги и контроллеры, см. [`sync_config`]).
+pub async fn prepare(pool: &PgPool, controllers: &[Controller], all_yaml_names: &[String]) -> Result<(), PrepareError> {
+    match pool.acquire().await {
+        Ok(conn) => drop(conn),
+        Err(e) if is_transient(&e) => return Err(PrepareError::Unavailable(e)),
+        Err(e) => return Err(PrepareError::Failed(anyhow::Error::new(e).context("БД недоступна"))),
+    }
+    sqlx::migrate!("./migrations").run(pool).await.context("миграция схемы").map_err(PrepareError::Failed)?;
+    sync_config(pool, controllers, all_yaml_names).await.context("синхронизация с YAML").map_err(PrepareError::Failed)
 }
 
 /// Ошибка, которая может пройти сама: сети нет, сервер ещё стартует. Неверный пароль, непроверяемый
@@ -83,17 +102,20 @@ fn is_transient(e: &sqlx::Error) -> bool {
 
 /// Синхронизировать controllers/tags с controllers.yaml (YAML — источник истины) и проставить
 /// id из БД. Ключи upsert как у Java-шлюза: контроллер — по имени, тег — по nodeId в пределах
-/// контроллера; исчезнувшие из YAML удаляются. Одной транзакцией.
-pub async fn sync_config(pool: &PgPool, controllers: &mut [Controller], all_yaml_names: &[String]) -> Result<()> {
+/// контроллера; исчезнувшие из YAML удаляются. Одной транзакцией; номера проставляются после её фиксации —
+/// при откате (БД пропала посреди синхронизации) в тегах не остаётся номеров несуществующих строк.
+pub async fn sync_config(pool: &PgPool, controllers: &[Controller], all_yaml_names: &[String]) -> Result<()> {
     let mut tx = pool.begin().await?;
     // Пара горячего резерва на общей БД стартует одновременно: без блокировки оба экземпляра вставляли
     // бы одни и те же контроллеры (нарушение UNIQUE → падение старта). Второй ждёт первого и видит
     // готовые строки. Блокировка снимается с концом транзакции.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('scada-gateway:config-sync'))").execute(&mut *tx).await?;
     let mut counts = SyncCounts::default();
-    for ctrl in controllers.iter_mut() {
-        ctrl.id = upsert_controller(&mut tx, ctrl).await?;
-        sync_tags(&mut tx, ctrl, &mut counts).await?;
+    let mut ids: Vec<(DbId, i64)> = Vec::new();
+    for ctrl in controllers {
+        let ctrl_id = upsert_controller(&mut tx, ctrl).await?;
+        ids.push((ctrl.id.clone(), ctrl_id));
+        sync_tags(&mut tx, ctrl, ctrl_id, &mut counts, &mut ids).await?;
     }
     // Контроллеры, которых больше нет в YAML (выключенные в YAML остаются), — вместе с тегами.
     let gone =
@@ -103,6 +125,9 @@ pub async fn sync_config(pool: &PgPool, controllers: &mut [Controller], all_yaml
             .await?;
     sqlx::query("DELETE FROM controllers WHERE NOT (name = ANY($1))").bind(all_yaml_names).execute(&mut *tx).await?;
     tx.commit().await?;
+    for (cell, id) in ids {
+        cell.set(id);
+    }
     info!(
         "Синхронизация с YAML: тегов создано {}, обновлено {}, удалено {}",
         counts.created,
@@ -140,19 +165,24 @@ async fn upsert_controller(tx: &mut Tx<'_>, ctrl: &Controller) -> Result<i64> {
     Ok(row.get("id"))
 }
 
-/// Теги контроллера: существующие (по nodeId) обновить, новые вставить, пропавшие из YAML удалить; id — в теги.
-async fn sync_tags(tx: &mut Tx<'_>, ctrl: &mut Controller, counts: &mut SyncCounts) -> Result<()> {
+/// Теги контроллера: существующие (по nodeId) обновить, новые вставить, пропавшие из YAML удалить; номера — в `ids`.
+async fn sync_tags(
+    tx: &mut Tx<'_>,
+    ctrl: &Controller,
+    ctrl_id: i64,
+    counts: &mut SyncCounts,
+    ids: &mut Vec<(DbId, i64)>,
+) -> Result<()> {
     let existing: HashMap<String, i64> = sqlx::query("SELECT id, node_id FROM tags WHERE controller_id = $1")
-        .bind(ctrl.id)
+        .bind(ctrl_id)
         .fetch_all(&mut **tx)
         .await?
         .into_iter()
         .map(|r| (r.get::<String, _>("node_id"), r.get::<i64, _>("id")))
         .collect();
     let mut seen = Vec::with_capacity(ctrl.tags.len());
-    for tag in ctrl.tags.iter_mut() {
-        let t = std::sync::Arc::make_mut(tag);
-        t.id = match existing.get(&t.node_id) {
+    for t in &ctrl.tags {
+        let id = match existing.get(&t.node_id) {
             Some(&id) => {
                 counts.updated += 1;
                 update_tag(tx, id, t).await?;
@@ -160,13 +190,14 @@ async fn sync_tags(tx: &mut Tx<'_>, ctrl: &mut Controller, counts: &mut SyncCoun
             }
             None => {
                 counts.created += 1;
-                insert_tag(tx, ctrl.id, t).await?
+                insert_tag(tx, ctrl_id, t).await?
             }
         };
+        ids.push((t.id.clone(), id));
         seen.push(t.node_id.clone());
     }
     let stale = sqlx::query("DELETE FROM tags WHERE controller_id = $1 AND NOT (node_id = ANY($2))")
-        .bind(ctrl.id)
+        .bind(ctrl_id)
         .bind(&seen)
         .execute(&mut **tx)
         .await?;

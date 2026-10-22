@@ -35,6 +35,8 @@ pub struct Leadership {
     /// заново отправить значения всех тегов (иначе неизменившиеся молчали бы до полной отправки).
     activations: AtomicU64,
     since: Mutex<DateTime<Utc>>,
+    /// Экземпляры другой станции, замеченные в группе выборов (для `/api/ha`); пусто — смешения нет.
+    foreign: Mutex<Vec<String>>,
     tx: watch::Sender<RoleChange>,
     gauge: IntGauge,
 }
@@ -68,6 +70,7 @@ impl Leadership {
             active: AtomicBool::new(active),
             activations: AtomicU64::new(u64::from(active)),
             since: Mutex::new(Utc::now()),
+            foreign: Mutex::new(Vec::new()),
             tx,
             gauge,
         })
@@ -101,6 +104,16 @@ impl Leadership {
     /// Когда роль менялась в последний раз.
     pub fn since(&self) -> DateTime<Utc> {
         *self.since.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Экземпляры другой станции в группе выборов (`экземпляр@хост`), по последней проверке.
+    pub fn foreign_members(&self) -> Vec<String> {
+        self.foreign.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// Запомнить результат проверки группы выборов (см. [`crate::ha`]).
+    pub fn set_foreign_members(&self, members: Vec<String>) {
+        *self.foreign.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = members;
     }
 
     /// Подписка на смены роли (`watch`: сразу видно текущее значение).

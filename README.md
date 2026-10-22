@@ -1,8 +1,8 @@
 # SCADA Gateway (Rust)
 
-[![CI/CD](https://github.com/EuZireael/SCADA_rust/actions/workflows/ci.yml/badge.svg)](https://github.com/EuZireael/SCADA_rust/actions/workflows/ci.yml)
-[![Audit](https://github.com/EuZireael/SCADA_rust/actions/workflows/audit.yml/badge.svg)](https://github.com/EuZireael/SCADA_rust/actions/workflows/audit.yml)
-[![Release](https://img.shields.io/github/v/release/EuZireael/SCADA_rust?sort=semver)](https://github.com/EuZireael/SCADA_rust/releases/latest)
+[![CI/CD](https://github.com/EuZireael/SCADA_gateway_rust/actions/workflows/ci.yml/badge.svg)](https://github.com/EuZireael/SCADA_gateway_rust/actions/workflows/ci.yml)
+[![Audit](https://github.com/EuZireael/SCADA_gateway_rust/actions/workflows/audit.yml/badge.svg)](https://github.com/EuZireael/SCADA_gateway_rust/actions/workflows/audit.yml)
+[![Release](https://img.shields.io/github/v/release/EuZireael/SCADA_gateway_rust?sort=semver)](https://github.com/EuZireael/SCADA_gateway_rust/releases/latest)
 
 **Шлюз сбора данных АСУ ТП.** Опрашивает промышленные контроллеры по **OPC UA**, **Modbus TCP** и **PAC**
 (driver-master, Savushkin/ptusa), публикует телеметрию, события и алармы в **Kafka** для монитора, принимает от него
@@ -177,8 +177,8 @@ opcua:
 | `scada-commands` | монитор → шлюз | — | `{"commandId","tagName","value","requestedBy","timestamp"}` |
 | `scada-command-results` | шлюз → монитор | имя тега | `{"commandId","status","success","message","appliedValue",…}` |
 
-Статусы команд: `APPLIED`, `REJECTED_UNKNOWN_TAG`, `REJECTED_NOT_WRITABLE`, `REJECTED_TYPE_MISMATCH`, `REJECTED_EXPIRED`,
-`FAILED_NO_CONNECTION`, `FAILED_WRITE`, `FAILED_NOT_APPLIED`. Правила публикации «по исключению» —
+Статусы команд: `APPLIED`, `REJECTED_UNKNOWN_TAG`, `REJECTED_NOT_WRITABLE`, `REJECTED_TYPE_MISMATCH`, `REJECTED_OUT_OF_RANGE`,
+`REJECTED_EXPIRED`, `FAILED_NO_CONNECTION`, `FAILED_WRITE`, `FAILED_NOT_APPLIED`. Правила публикации «по исключению» —
 `docs/TELEMETRY_BY_EXCEPTION.md`, подключение монитора — `docs/MONITOR_INTEGRATION.md`.
 
 ## Эксплуатация

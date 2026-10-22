@@ -4,7 +4,9 @@
 //!   * `kill -9` активного — резерв подхватывает за session-timeout, заново отправляет ВСЕ теги
 //!     (прежний мог упасть, потребитель значений не знает) и принимает команды сразу;
 //!   * вернувшийся экземпляр лидерство не отбирает;
-//!   * штатная остановка активного — резерв подхватывает за доли секунды.
+//!   * штатная остановка активного — резерв подхватывает за доли секунды;
+//!   * две станции (каждая — пара) на одном Kafka со своими топиками команд не мешают друг другу, а экземпляр
+//!     другой станции в группу выборов не вступает.
 //!
 //! Брокеру нужен `group.min.session.timeout.ms ≤ 1000` (docker-compose.yml и CI это задают).
 //!
@@ -13,6 +15,7 @@
 mod common;
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rdkafka::consumer::StreamConsumer;
@@ -226,4 +229,130 @@ async fn blind_active_without_a_peer_stays_active() {
     tokio::time::sleep(Duration::from_secs(12)).await;
     assert_eq!(a.role().as_deref(), Some("ACTIVE"), "{}", a.log_tail());
     a.delete_topics().await;
+}
+
+/// Отдельная «станция» для тестов двух станций: controllers.yaml тестов, в котором остался один контроллер `keep`.
+fn station_yaml(dir: &Path, keep: &str) -> PathBuf {
+    let raw = std::fs::read_to_string(controllers_path()).unwrap();
+    let (head, servers) = raw.split_once("\n  servers:\n").expect("секция servers");
+    let block = format!("\n{servers}")
+        .split("\n    - ")
+        .skip(1)
+        .find(|b| b.contains(&format!("name: \"{keep}\"")))
+        .unwrap_or_else(|| panic!("в {} нет контроллера {keep}", controllers_path().display()))
+        .to_string();
+    let path = dir.join(format!("{}.yaml", keep.replace(' ', "_")));
+    std::fs::write(&path, format!("{head}\n  servers:\n    - {block}\n")).unwrap();
+    path
+}
+
+/// Экземпляр станции с настройками резерва по умолчанию: группа выборов — от топика команд, общий служебный топик.
+fn start_station(prefix: &str, yaml: &Path, instance: &str, ha_topic: &str) -> Gateway {
+    let session = session_ms().to_string();
+    let heartbeat = (session_ms() / 4).to_string();
+    Gateway::start_on(
+        prefix,
+        yaml,
+        &[
+            ("GATEWAY_HA_ENABLED", "true"),
+            ("GATEWAY_HA_INSTANCE_ID", instance),
+            ("GATEWAY_HA_TOPIC", ha_topic),
+            ("GATEWAY_HA_SESSION_TIMEOUT_MS", &session),
+            ("GATEWAY_HA_HEARTBEAT_INTERVAL_MS", &heartbeat),
+        ],
+    )
+}
+
+/// Экземпляры другой станции в группе выборов по `/api/ha`.
+fn foreign_members(gw: &Gateway) -> Vec<String> {
+    let (_, body) = gw.get("/api/ha").expect("/api/ha");
+    let ha: Value = serde_json::from_str(&body).unwrap();
+    ha["foreignMembers"].as_array().unwrap().iter().map(|m| m.as_str().unwrap().to_string()).collect()
+}
+
+/// Две станции (по паре на каждую) на одном Kafka со своими топиками команд и настройками резерва по умолчанию: у каждой
+/// свой активный, телеметрия и команды каждой идут своим путём, группа позиций команд по умолчанию общая и не мешает.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "нужны симулятор и Kafka с group.min.session.timeout.ms ≤ 1000: cargo test -- --ignored"]
+async fn two_stations_share_one_kafka_without_interfering() {
+    let dir = tempfile::tempdir().unwrap();
+    let (opc_station, pac_station) =
+        (station_yaml(dir.path(), "Phoenix Contact"), station_yaml(dir.path(), "PAC Savushkin"));
+    let ha_topic = format!("{}.ha", new_prefix()); // общий служебный топик, как `scada-gateway-ha` по умолчанию
+    let (pa, pb) = (new_prefix(), new_prefix()); // свои топики, в том числе команд
+    let a1 = start_station(&pa, &opc_station, "opc-1", &ha_topic);
+    let b1 = start_station(&pb, &pac_station, "pac-1", &ha_topic);
+    a1.wait_role("ACTIVE", Duration::from_secs(40)).await;
+    b1.wait_role("ACTIVE", Duration::from_secs(40)).await;
+    let a2 = start_station(&pa, &opc_station, "opc-2", &ha_topic);
+    let b2 = start_station(&pb, &pac_station, "pac-2", &ha_topic);
+    for gw in [&a1, &a2, &b1, &b2] {
+        gw.wait_links("UP", Duration::from_secs(40)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    // У каждой станции ровно один активный.
+    assert_eq!((a1.role().as_deref(), a2.role().as_deref()), (Some("ACTIVE"), Some("STANDBY")), "{}", a2.log_tail());
+    assert_eq!((b1.role().as_deref(), b2.role().as_deref()), (Some("ACTIVE"), Some("STANDBY")), "{}", b2.log_tail());
+    for gw in [&a1, &a2, &b1, &b2] {
+        assert!(foreign_members(gw).is_empty(), "{}", gw.log_tail());
+        assert_eq!(gw.metric("scada_ha_foreign_members"), Some(0.0));
+    }
+
+    // Команда каждой станции — в её топик; результат — один, от её активного.
+    let producer: FutureProducer = kafka_config().create().unwrap();
+    for (prefix, gw, tag) in
+        [(&pa, &a1, "Барановичи-1.BN1_MCA1.M_M.M3.M"), (&pb, &b1, "Барановичи-1.BN1_MCA1.V_M_1.LINE1V0.M")]
+    {
+        let results = consumer_from_beginning(&gw.topic("results")).await;
+        let (r, _) = command(&producer, &results, prefix, tag, json!(1)).await;
+        assert_eq!(r["status"], "APPLIED", "{tag}: {r}\n{}", gw.log_tail());
+        let (r, _) = command(&producer, &results, prefix, tag, json!(0)).await;
+        assert_eq!(r["status"], "APPLIED", "{tag}: {r}");
+    }
+    // Телеметрия каждой станции — в её топик и только её теги.
+    for (gw, own) in [(&a1, &opc_station), (&b1, &pac_station)] {
+        let raw = std::fs::read_to_string(own).unwrap();
+        let telemetry = consumer_from_beginning(&gw.topic("tags")).await;
+        let m = tokio::time::timeout(Duration::from_secs(15), telemetry.recv()).await.expect("телеметрия").unwrap();
+        let key = String::from_utf8_lossy(m.key().unwrap_or_default()).to_string();
+        assert!(raw.contains(&format!("\"{key}\"")), "{key} не из своей станции");
+    }
+    a1.delete_topics().await;
+    b1.delete_topics().await;
+}
+
+/// Две станции на настройках по умолчанию — один топик команд и, значит, одна группа выборов. Экземпляр второй станции в
+/// группу не вступает (первая остаётся активной, а не уходит в резерв по жребию), смешение видно в журнале, `/api/ha` и
+/// метрике; когда первая станция ушла из группы, вторая вступает сама.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "нужны симулятор и Kafka с group.min.session.timeout.ms ≤ 1000: cargo test -- --ignored"]
+async fn instance_of_another_station_does_not_join_its_election_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let (opc_station, pac_station) =
+        (station_yaml(dir.path(), "Phoenix Contact"), station_yaml(dir.path(), "PAC Savushkin"));
+    let prefix = new_prefix(); // общие топики, в том числе команд, — ошибка настройки
+    let ha_topic = format!("{prefix}.ha");
+    let mut a = start_station(&prefix, &opc_station, "opc-1", &ha_topic);
+    a.wait_role("ACTIVE", Duration::from_secs(40)).await;
+    let b = start_station(&prefix, &pac_station, "pac-1", &ha_topic);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !b.log().contains("экземпляры другой станции") {
+        assert!(Instant::now() < deadline, "смешение не замечено\n{}", b.log_tail());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let found = foreign_members(&b);
+    assert!(found.len() == 1 && found[0].starts_with("opc-1@"), "{found:?}");
+    assert_eq!(b.metric("scada_ha_foreign_members"), Some(1.0));
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(a.role().as_deref(), Some("ACTIVE"), "работающая станция не отдаёт лидерство\n{}", a.log_tail());
+    assert_eq!(b.role().as_deref(), Some("STANDBY"), "{}", b.log_tail());
+    assert!(foreign_members(&a).is_empty(), "вторая станция в группу не вступала");
+
+    // Первая станция ушла — вторая вступает при следующей проверке (раз в 30 с).
+    a.terminate();
+    b.wait_role("ACTIVE", Duration::from_secs(45)).await;
+    assert!(foreign_members(&b).is_empty());
+    assert_eq!(b.metric("scada_ha_foreign_members"), Some(0.0));
+    b.delete_topics().await;
 }

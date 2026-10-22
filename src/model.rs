@@ -1,6 +1,7 @@
 //! Доменная модель: контроллер, тег, значение, метка времени.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Serializer};
@@ -55,11 +56,28 @@ impl ControllerKind {
     }
 }
 
+/// Номер строки в БД шлюза. Проставляется синхронизацией с БД — при запуске или позже, когда БД стала доступна; до этого 0.
+/// Копии тега и контроллера делят одну ячейку: номер, полученный после запуска, сразу виден опросу, командам и истории.
+#[derive(Debug, Clone, Default)]
+pub struct DbId(Arc<AtomicI64>);
+
+impl DbId {
+    /// Номер; 0 — ещё не известен (БД выключена или не была доступна).
+    pub fn get(&self) -> i64 {
+        self.0.load(Ordering::Acquire)
+    }
+
+    /// Проставить номер (синхронизация с БД).
+    pub fn set(&self, id: i64) {
+        self.0.store(id, Ordering::Release);
+    }
+}
+
 /// Тег (канал) с адресацией и правами — неизменяемая часть конфигурации.
 #[derive(Debug, Clone)]
 pub struct Tag {
-    /// PK тега в БД шлюза (0 — работа без БД).
-    pub id: i64,
+    /// PK тега в БД шлюза (0 — работа без БД или БД ещё не была доступна).
+    pub id: DbId,
     /// Порядковый номер среди включённых тегов контроллера: по нему обработчик хранит состояние
     /// тега (качество, последнее опубликованное значение…) вектором, а не хеш-таблицей по имени.
     pub slot: usize,
@@ -93,6 +111,10 @@ pub struct Tag {
     pub min_value: Option<f64>,
     /// Верхний предел для аларма.
     pub max_value: Option<f64>,
+    /// Пределы значения команды, включительно (`writeMin`/`writeMax`); в единицах оператора, до скрипта канала.
+    pub write_min: Option<f64>,
+    /// Верхний предел значения команды, включительно.
+    pub write_max: Option<f64>,
     /// Адрес holding-регистра в нотации 4xxxx (40001…); только Modbus.
     pub modbus_address: Option<i32>,
     /// Тип регистра из YAML (справочно, пишется в БД; декодирование идёт по `data_type`).
@@ -110,7 +132,7 @@ impl Tag {
     pub fn from_config(cfg: &TagConfig) -> Self {
         let protocol_raw = cfg.protocol.clone().unwrap_or_else(|| "opcua".into());
         Tag {
-            id: 0,
+            id: DbId::default(),
             slot: 0,
             name: cfg.name.clone(),
             node_id: cfg.node_id.clone(),
@@ -127,6 +149,8 @@ impl Tag {
             unit: cfg.unit.clone(),
             min_value: cfg.min_value,
             max_value: cfg.max_value,
+            write_min: cfg.write_min,
+            write_max: cfg.write_max,
             modbus_address: cfg.modbus_address,
             modbus_type: cfg.modbus_type.clone(),
             modbus_unit_id: cfg.modbus_unit_id.unwrap_or(1),
@@ -255,8 +279,8 @@ impl OpcSecurity {
 /// Контроллер со своими тегами.
 #[derive(Debug, Clone)]
 pub struct Controller {
-    /// PK контроллера в БД шлюза (0 — работа без БД).
-    pub id: i64,
+    /// PK контроллера в БД шлюза (0 — работа без БД или БД ещё не была доступна).
+    pub id: DbId,
     /// Уникальное имя контроллера (ключ строки в таблице `controllers`).
     pub name: String,
     /// Адрес со схемой (`opc.tcp://`, `modbus://`, `pac://`).
@@ -275,7 +299,7 @@ impl Controller {
     /// Контроллер из записи YAML; `None`, если схема адреса неизвестна. Берутся только включённые теги, каждому присваивается слот.
     pub fn from_config(cfg: &ServerConfig) -> Option<Self> {
         Some(Controller {
-            id: 0,
+            id: DbId::default(),
             name: cfg.name.clone(),
             endpoint: cfg.endpoint.clone(),
             kind: ControllerKind::from_endpoint(&cfg.endpoint)?,
@@ -529,6 +553,8 @@ mod tests {
             unit: None,
             min_value: None,
             max_value: None,
+            write_min: None,
+            write_max: None,
             modbus_address: None,
             modbus_type: None,
             modbus_unit_id: None,

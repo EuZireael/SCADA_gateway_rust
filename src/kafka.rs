@@ -189,7 +189,9 @@ impl KafkaOut {
             .set("acks", "all")
             .set("compression.type", "snappy")
             .set("linger.ms", "5")
-            .set("batch.size", "32768")
+            // Пачка до 1 МБ (до сжатия; предел librdkafka — message.max.bytes). При 32 КБ в запросе ~200 сообщений,
+            // а запросы к партиции идут по одному: на Windows ответ ~45 мс — потолок ~5 тыс./с на топик.
+            .set("batch.size", "1000000")
             // Недоставленное за 30 с считается ошибкой: свежий цикл опроса пришлёт новое значение.
             .set("message.timeout.ms", "30000")
             .create_with_context(DeliveryCounter { metrics: metrics.clone(), state: delivery.clone() })
@@ -358,10 +360,12 @@ async fn create_topics(settings: &KafkaSettings, specs: &[(&str, i32)]) {
 /// `scada-gateway-group`: новый активный продолжает с позиции прежнего, и команды, пришедшие за время
 /// переключения, не теряются. Первый запуск группы (коммитов нет) — с конца топика. Команды,
 /// пролежавшие в топике дольше `gateway.commands.max-age-ms` (шлюзы стояли оба), отсекаются по
-/// возрасту — [`crate::command::handle`].
+/// возрасту — [`crate::command::process`].
 ///
 /// Позиция фиксируется **до** исполнения (не более одного раза): повторное исполнение управляющей
 /// команды после сбоя опаснее потерянной — монитор получит `NO_CONFIRMATION` («результат неизвестен»).
+/// `handler` раскладывает команды по очередям контроллеров ([`crate::command::submit`]) и записи не ждёт:
+/// позиция фиксируется в момент постановки в очередь.
 pub async fn consume_commands<F, Fut>(
     settings: KafkaSettings,
     leadership: Arc<Leadership>,
@@ -392,7 +396,7 @@ pub async fn consume_commands<F, Fut>(
             .unwrap_or_else(|e| Err(anyhow::anyhow!("задача создания консьюмера: {e}")));
         match created {
             Ok(consumer) => {
-                info!("▶ Приём команд включён: {topic}");
+                info!("▶ Приём команд включён: {topic} (группа позиций {})", settings.commands_group);
                 consume_while_active(&consumer, &leadership, &mut role, &cancel, &handler).await;
                 // drop консьюмера ждёт его закрытия — не на потоке рантайма.
                 let _ = tokio::task::spawn_blocking(move || drop(consumer)).await;
@@ -464,10 +468,14 @@ fn preview(payload: &[u8]) -> String {
     }
 }
 
-/// Консьюмер с ручным назначением всех партиций топика команд: с закоммиченной позиции группы, а при первом запуске — с конца.
+/// Консьюмер с ручным назначением всех партиций топика команд: с закоммиченной позиции группы `GATEWAY_COMMANDS_GROUP_ID`,
+/// а при первом запуске — с конца.
 fn assigned_consumer(settings: &KafkaSettings, topic: &str) -> Result<StreamConsumer> {
-    let consumer: StreamConsumer =
-        settings.client_config().set("group.id", "scada-gateway-group").set("enable.auto.commit", "false").create()?;
+    let consumer: StreamConsumer = settings
+        .client_config()
+        .set("group.id", &settings.commands_group)
+        .set("enable.auto.commit", "false")
+        .create()?;
     let metadata = consumer.fetch_metadata(Some(topic), Duration::from_secs(10))?;
     let partitions: Vec<i32> = metadata
         .topics()

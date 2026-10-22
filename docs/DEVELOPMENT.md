@@ -226,3 +226,7 @@ push/PR и раз в неделю. Исключения (с обосновани
 CI проверит, что тег совпадает с `Cargo.toml`, прогонит все проверки, опубликует `ghcr.io/euzireael/scada_rust:vX.Y.Z`
 и создаст GitHub Release с текстом раздела. Пакет в GHCR приватный; доступ — по правам репозитория, вход для чтения —
 токеном с `read:packages` (`docker login ghcr.io`).
+
+Имя образа задано в `.github/workflows/ci.yml` (`env.IMAGE`) и от имени репозитория не зависит: репозиторий
+переименован в `SCADA_gateway_rust`, образ остался `scada_rust`. Клон со старым адресом:
+`git remote set-url origin git@github.com:EuZireael/SCADA_gateway_rust.git`.

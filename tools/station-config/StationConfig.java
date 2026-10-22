@@ -80,7 +80,7 @@ public class StationConfig {
         Set<String> unmapped = new LinkedHashSet<>();
         Map<String, Integer> unknownRule = new TreeMap<>();
         StringBuilder tags = new StringBuilder();
-        int total = 0, enabled = 0, writable = 0;
+        int total = 0, enabled = 0, writable = 0, limited = 0;
         Map<String, Integer> byType = new TreeMap<>();
         Map<String, Integer> offNotInProject = new TreeMap<>();
         Map<String, Integer> offByOverride = new TreeMap<>();
@@ -107,6 +107,10 @@ public class StationConfig {
                 rw = false; // нет правила — только чтение (безопасно)
             }
             if (WRITE_ALL) rw = !"STRING".equals(dataType);
+            String limits = overrides.limits(kind, legacy.field());
+            if (limits != null && "STRING".equals(dataType)) {
+                throw new IllegalArgumentException("overrides.tsv: пределы записи у строкового канала " + ch.name());
+            }
             boolean on = !"0".equals(ch.enabled().trim());
             // Объекта нет в проекте ПЛК (OBJECT4 при трёх техобъектах, прибор со старым именем) —
             // значения не будет никогда: канал выключен. SYSTEM — таблица самой ptusa, есть всегда.
@@ -122,6 +126,7 @@ public class StationConfig {
             total++;
             if (on) enabled++;
             if (rw) writable++;
+            if (limits != null) limited++;
             byType.merge(dataType, 1, Integer::sum);
             String nodeId = opcua ? "ns=2;s=" + opcNodeName(legacy.object(), legacy.field()) : "pac:" + ch.name();
             tags.append("        - {name: \"").append(q(path))
@@ -131,7 +136,7 @@ public class StationConfig {
                     .append("\", deviceType: \"").append(q(kind))
                     .append("\", protocol: ").append(opcua ? "opcua" : "pac").append(", dataType: ").append(dataType)
                     .append(", pollingRate: 1000, enabled: ").append(on)
-                    .append(", writable: ").append(rw).append("}\n");
+                    .append(", writable: ").append(rw).append(limits == null ? "" : limits).append("}\n");
         }
 
         String yaml = "# ============================================================================\n"
@@ -144,7 +149,9 @@ public class StationConfig {
                              : "#   writable — tools/station-config/writable-rules.tsv.\n")
                 + (opcua ? "# Адрес OPC UA-сервера — env PLC_HOST (IP объекта в публичный репозиторий не пишется).\n"
                          : "# Адрес контроллера — env PAC_HOST (в публичный репозиторий не пишется).\n")
-                + "#   каналов " + total + ", включено " + enabled + ", на запись " + writable + "; типы " + byType + "\n"
+                + "#   writeMin/writeMax — tools/station-config/overrides.tsv (limits).\n"
+                + "#   каналов " + total + ", включено " + enabled + ", на запись " + writable + ", с пределами записи " + limited
+                + "; типы " + byType + "\n"
                 + "# ============================================================================\n"
                 + "opcua:\n"
                 + "  servers:\n"
@@ -155,7 +162,8 @@ public class StationConfig {
                 + "      tags:\n" + tags;
         Files.writeString(out, yaml);
 
-        System.out.printf("Каналов %d (включено %d, на запись %d), типы %s → %s%n", total, enabled, writable, byType, out);
+        System.out.printf("Каналов %d (включено %d, на запись %d, с пределами записи %d), типы %s → %s%n",
+                total, enabled, writable, limited, byType, out);
         if (!merged.isEmpty()) System.out.println("Слиты (одинаковый путь, как у монитора): " + merged.size() + " " + head(merged));
         if (!skipped.isEmpty()) System.out.println("Пропущены (имя без точки): " + skipped.size() + " " + head(skipped));
         if (!unmapped.isEmpty()) System.out.println("Нет в проекте ПЛК (путь по эвристике): " + unmapped.size() + " " + head(new ArrayList<>(unmapped)));
@@ -207,15 +215,18 @@ public class StationConfig {
      * <pre>
      *   type     вид   поле        ТИП          # тип, который DataTypeResolver угадал неверно
      *   access   вид   поле        RW|RO        # доступ, которого нет в writable-rules.tsv
+     *   limits   вид   поле        MIN|- MAX|-  # пределы значения команды (writeMin/writeMax), включительно
      *   disable  маска имени в ПЛК  причина…     # поля нет у прибора в прошивке
      * </pre>
      */
-    record Overrides(Map<String, String> types, Map<String, Boolean> rw, Map<Pattern, String> disabled) {
+    record Overrides(Map<String, String> types, Map<String, Boolean> rw, Map<String, String> limits,
+                     Map<Pattern, String> disabled) {
         static Overrides load(Path tsv) throws IOException {
             Map<String, String> types = new LinkedHashMap<>();
             Map<String, Boolean> rw = new LinkedHashMap<>();
+            Map<String, String> limits = new LinkedHashMap<>();
             Map<Pattern, String> disabled = new LinkedHashMap<>();
-            if (!Files.exists(tsv)) return new Overrides(types, rw, disabled);
+            if (!Files.exists(tsv)) return new Overrides(types, rw, limits, disabled);
             for (String line : Files.readAllLines(tsv)) {
                 String l = line.strip();
                 if (l.isEmpty() || l.startsWith("#")) continue;
@@ -229,11 +240,32 @@ public class StationConfig {
                         String[] t = l.split("\\s+");
                         rw.put(t[1] + "\t" + t[2], "RW".equals(t[3]));
                     }
+                    case "limits" -> {
+                        String[] t = l.split("\\s+");
+                        if (t.length < 5) throw new IllegalArgumentException("overrides.tsv: limits <вид> <поле> <MIN|-> <MAX|->: " + line);
+                        Double lo = bound(t[3], line), hi = bound(t[4], line);
+                        if (lo == null && hi == null || lo != null && hi != null && lo > hi) {
+                            throw new IllegalArgumentException("overrides.tsv: пределы не заданы или MIN > MAX: " + line);
+                        }
+                        limits.put(t[1] + "\t" + t[2], (lo == null ? "" : ", writeMin: " + t[3]) + (hi == null ? "" : ", writeMax: " + t[4]));
+                    }
                     case "disable" -> disabled.put(glob(c[1]), c.length > 2 ? c[2] : "overrides.tsv");
                     default -> throw new IllegalArgumentException("overrides.tsv: " + line);
                 }
             }
-            return new Overrides(types, rw, disabled);
+            return new Overrides(types, rw, limits, disabled);
+        }
+
+        /** Предел из overrides.tsv: десятичное число (в YAML пишется как есть) или «-» (не задан). */
+        private static Double bound(String text, String line) {
+            if ("-".equals(text)) return null;
+            if (!text.matches("-?\\d+(\\.\\d+)?")) throw new IllegalArgumentException("overrides.tsv: предел не число: " + line);
+            return Double.parseDouble(text);
+        }
+
+        /** Фрагмент YAML {@code , writeMin: …, writeMax: …} для канала или null. */
+        String limits(String kind, String field) {
+            return limits.get(kind + "\t" + Rules.fieldKey(field));
         }
 
         java.util.Optional<Boolean> rw(String kind, String field) {

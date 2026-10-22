@@ -150,11 +150,18 @@ async fn run() -> Result<()> {
 
     // Горячее резервирование: выборы и журнал смены роли.
     let blind_app = app.clone();
+    // Отметка станции — по её контроллерам: экземпляр другой станции в той же группе выборов виден и в неё не вступает.
+    let station_check = ha::StationCheck::new(
+        ha::StationMark::of(app.controllers.iter().map(|c| c.ctrl.name.as_str())),
+        events.clone(),
+        app.metrics.ha_foreign_members.clone(),
+    );
     let elector = ha::spawn(
         ha_settings,
         kafka_settings,
         leadership.clone(),
         Arc::new(move || blind_app.all_links_down()),
+        station_check,
         tasks.cancel.clone(),
     );
     if leadership.is_ha_enabled() {
@@ -163,6 +170,9 @@ async fn run() -> Result<()> {
         tasks.supervise("ha-events", move || ha::record_events(leadership.clone(), events.clone(), cancel.clone()));
     }
 
+    if let Some(pending) = station.pending_db {
+        startup::spawn_db_sync(&app, pending, &mut tasks);
+    }
     startup::spawn_pollers(&app, &mut tasks);
     startup::spawn_commands(&app, &leadership, &mut tasks);
     startup::spawn_tag_settings(&app, &mut tasks);

@@ -53,6 +53,9 @@ pub struct KafkaSettings {
     pub tag_settings_topic: String,
     /// Применять ли настройки тегов из топика (`GATEWAY_TAG_SETTINGS_ENABLED`).
     pub tag_settings_enabled: bool,
+    /// Группа, в которой хранится позиция чтения топика команд (`GATEWAY_COMMANDS_GROUP_ID`). Позиции у Kafka — по топику,
+    /// поэтому станциям со своими топиками команд общая группа не мешает; своя нужна для раздельных ACL.
+    pub commands_group: String,
 }
 
 impl KafkaSettings {
@@ -248,6 +251,8 @@ impl KafkaSettings {
             },
             tag_settings_topic: env_or(&["CHANNEL_TAG_SETTINGS_TOPIC"], "channel.tag-settings"),
             tag_settings_enabled: env_bool(&["GATEWAY_TAG_SETTINGS_ENABLED"], true),
+            // Прежнее имя — по умолчанию: с другим шлюз после обновления начал бы с конца топика и потерял команды окна обновления.
+            commands_group: env_or(&["GATEWAY_COMMANDS_GROUP_ID", "GATEWAY_COMMANDS_GROUPID"], "scada-gateway-group"),
         })
     }
 }
@@ -520,7 +525,9 @@ mod tests {
                     &a.data_type,
                     a.enabled,
                     a.writable,
-                    a.polling_rate
+                    a.polling_rate,
+                    a.write_min,
+                    a.write_max
                 ),
                 (
                     &b.name,
@@ -530,7 +537,9 @@ mod tests {
                     &b.data_type,
                     b.enabled,
                     b.writable,
-                    b.polling_rate
+                    b.polling_rate,
+                    b.write_min,
+                    b.write_max
                 ),
                 "{}",
                 a.name
@@ -632,6 +641,31 @@ opcua:
         let units = format!("{}, {}", modbus("a", 40001, 1), modbus("b", 40002, 2));
         let err = rejected(&server("modbus://h:502", &units)).expect("отклонён");
         assert!(err.contains("разные modbusUnitId"), "{err}");
+    }
+
+    #[test]
+    fn write_limits_are_checked_at_start() {
+        let server = |data_type: &str, limits: &str| {
+            format!(
+                "    - {{name: C, endpoint: \"opc.tcp://h:1\", enabled: true, tags: [{{name: t, nodeId: n, dataType: {data_type}, enabled: true, writable: true, {limits}}}]}}\n"
+            )
+        };
+        let servers =
+            parse_controllers(&format!("opcua:\n  servers:\n{}", server("FLOAT", "writeMin: 0, writeMax: 85.5")))
+                .unwrap();
+        assert_eq!((servers[0].tags[0].write_min, servers[0].tags[0].write_max), (Some(0.0), Some(85.5)));
+        assert_eq!(rejected(&server("INT32", "writeMax: 100")), None, "один предел");
+        assert_eq!(rejected(&server("INT32", "writeMin: 5, writeMax: 5")), None, "одно допустимое значение");
+        for (data_type, limits, expected) in [
+            ("FLOAT", "writeMin: 10, writeMax: 1", "больше writeMax"),
+            ("FLOAT", "writeMin: .nan", "не конечное"),
+            ("FLOAT", "writeMax: .inf", "не конечное"),
+            ("BOOL", "writeMax: 1", "только у числового"),
+            ("STRING", "writeMin: 0", "только у числового"),
+        ] {
+            let err = rejected(&server(data_type, limits)).expect("отклонён");
+            assert!(err.contains(expected), "{data_type} {limits}: {err}");
+        }
     }
 
     /// Примеры `controllers.yaml` в документации не устаревают: каждый блок ```yaml, начинающийся с `opcua:`, проходит

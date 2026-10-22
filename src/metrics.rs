@@ -5,7 +5,8 @@
 use std::collections::HashMap;
 
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
+    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
+    TextEncoder,
 };
 
 /// Все метрики шлюза. Поля увеличиваются из любого места; регистрация и текстовый вывод — внутри.
@@ -28,8 +29,14 @@ pub struct Metrics {
     /// Сколько тегов сейчас с настройками из топика `channel.tag-settings` (период опроса, зона истории).
     pub tag_settings_tags: IntGauge,
     ha_active: IntGaugeVec,
+    /// Экземпляров другой станции в группе выборов резервирования (должно быть 0).
+    pub ha_foreign_members: IntGauge,
     /// Команды по исходу (`status`).
     pub commands: IntCounterVec,
+    /// Команд в очереди контроллера (`controller`), ещё не взятых в исполнение.
+    pub command_queue: IntGaugeVec,
+    /// Сколько команда ждала в очереди своего контроллера (`controller`), с.
+    pub command_wait_seconds: HistogramVec,
     /// Контроллеров на связи сейчас.
     pub controllers_connected: IntGauge,
     /// Сколько контроллеров настроено.
@@ -79,6 +86,19 @@ impl Metrics {
         let commands = IntCounterVec::new(Opts::new("scada_commands_total", "Команды записи по исходу"), &["status"])
             .expect("метрика");
         registry.register(Box::new(commands.clone())).expect("регистрация метрики");
+        let command_queue = IntGaugeVec::new(
+            Opts::new("scada_command_queue", "Команд в очереди контроллера, ещё не взятых в исполнение"),
+            &["controller"],
+        )
+        .expect("метрика");
+        registry.register(Box::new(command_queue.clone())).expect("регистрация метрики");
+        let command_wait_seconds = HistogramVec::new(
+            HistogramOpts::new("scada_command_wait_seconds", "Ожидание команды в очереди своего контроллера")
+                .buckets(vec![0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]),
+            &["controller"],
+        )
+        .expect("метрика");
+        registry.register(Box::new(command_wait_seconds.clone())).expect("регистрация метрики");
         let script_errors =
             IntCounterVec::new(Opts::new("scada_script_errors_total", "Ошибки пользовательских скриптов"), &["script"])
                 .expect("метрика");
@@ -131,7 +151,13 @@ impl Metrics {
             scripts_bound_tags: gauge("scada_scripts_bound_tags", "Каналов с пользовательскими скриптами"),
             tag_settings_tags: gauge("scada_tag_settings_tags", "Тегов с настройками из топика channel.tag-settings"),
             ha_active,
+            ha_foreign_members: gauge(
+                "scada_ha_foreign_members",
+                "Экземпляров другой станции в группе выборов резервирования (должно быть 0)",
+            ),
             commands,
+            command_queue,
+            command_wait_seconds,
             controllers_connected: gauge("scada_controllers_connected", "Контроллеров на связи"),
             controllers_total: gauge("scada_controllers_total", "Всего сконфигурировано контроллеров"),
             kafka_send_errors: counter("scada_kafka_send_errors_total", "Ошибки постановки/доставки в Kafka"),
