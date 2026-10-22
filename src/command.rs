@@ -133,6 +133,9 @@ pub async fn execute(app: &App, cmd: &CommandMessage) -> Outcome {
         );
     }
     let data_type = cmd.data_type.as_deref().unwrap_or(&tag.data_type);
+    if let Err(outcome) = check_limits(&tag, data_type, &cmd.value) {
+        return outcome;
+    }
     // Скрипт канала с write(): значение оператора (инженерные единицы) → значение для ПЛК, до приведения
     // типа. Упал — ошибка значения, в ПЛК ничего не уходит.
     let scripted = app.scripts.has_chain(&tag.name);
@@ -155,6 +158,35 @@ pub async fn execute(app: &App, cmd: &CommandMessage) -> Outcome {
         Protocol::Pac => write_pac(app, &controller, write).await,
         Protocol::Modbus => unreachable!("отсечено выше"),
     }
+}
+
+/// Пределы `writeMin`/`writeMax` тега, включительно. Проверяется значение оператора — до скрипта канала, в тех же единицах,
+/// что телеметрия и пределы аларма; приведённое к типу (у целого тега 85,7 → 85 — то, что и будет записано).
+fn check_limits(tag: &model::Tag, data_type: &str, value: &Value) -> Result<(), Outcome> {
+    if tag.write_min.is_none() && tag.write_max.is_none() {
+        return Ok(());
+    }
+    let coerced = coerce(data_type, value)
+        .map_err(|e| Outcome::fail("REJECTED_TYPE_MISMATCH", format!("Значение не приводится к типу тега: {e}")))?;
+    // Строка в обход пределов не проходит: у тега с пределами значение команды — только число.
+    let Some(number) = coerced.as_f64() else {
+        return Err(Outcome::fail(
+            "REJECTED_TYPE_MISMATCH",
+            format!("У тега заданы пределы записи, значение должно быть числом: {coerced}"),
+        ));
+    };
+    let below = tag.write_min.is_some_and(|lo| number < lo);
+    let above = tag.write_max.is_some_and(|hi| number > hi);
+    if !below && !above {
+        return Ok(());
+    }
+    let limits = match (tag.write_min, tag.write_max) {
+        (Some(lo), Some(hi)) => format!("от {lo} до {hi}"),
+        (Some(lo), None) => format!("не меньше {lo}"),
+        (None, Some(hi)) => format!("не больше {hi}"),
+        (None, None) => unreachable!("проверено выше"),
+    };
+    Err(Outcome::fail("REJECTED_OUT_OF_RANGE", format!("Значение {number} вне пределов записи тега: {limits}")))
 }
 
 /// Приведённая к типу тега команда, готовая к записи в ПЛК.
@@ -514,6 +546,56 @@ mod tests {
             }
         }
         assert!(coerce("FLOAT", &json!(null)).is_err());
+    }
+
+    fn tag_with_limits(data_type: &str, write_min: Option<f64>, write_max: Option<f64>) -> model::Tag {
+        let cfg = serde_json::from_value(json!({
+            "name": "t", "nodeId": "ns=2;s=1", "dataType": data_type, "enabled": true, "writable": true,
+            "writeMin": write_min, "writeMax": write_max,
+        }))
+        .unwrap();
+        model::Tag::from_config(&cfg)
+    }
+
+    fn limits_status(tag: &model::Tag, value: Value) -> Result<(), &'static str> {
+        check_limits(tag, &tag.data_type, &value).map_err(|o| o.status)
+    }
+
+    #[test]
+    fn write_limits_are_inclusive() {
+        let tag = tag_with_limits("FLOAT", Some(0.0), Some(85.5));
+        for ok in [json!(0), json!(85.5), json!("85.5"), json!(42.1)] {
+            assert_eq!(limits_status(&tag, ok.clone()), Ok(()), "{ok}");
+        }
+        for out in [json!(-0.001), json!(85.50001), json!(850), json!("850")] {
+            assert_eq!(limits_status(&tag, out.clone()), Err("REJECTED_OUT_OF_RANGE"), "{out}");
+        }
+        let err = check_limits(&tag, "FLOAT", &json!(850)).unwrap_err();
+        assert!(!err.success() && err.applied.is_none());
+        assert_eq!(err.message, "Значение 850 вне пределов записи тега: от 0 до 85.5");
+    }
+
+    #[test]
+    fn write_limits_reject_non_numbers_and_need_no_check_without_limits() {
+        let tag = tag_with_limits("FLOAT", None, Some(100.0));
+        // NaN и бесконечность не сравниваются с пределом — это ошибка значения, а не «в пределах».
+        for bad in [json!("NaN"), json!("inf"), json!("-Infinity"), json!(null), json!("abc")] {
+            assert_eq!(limits_status(&tag, bad.clone()), Err("REJECTED_TYPE_MISMATCH"), "{bad}");
+        }
+        // Тип из команды не обходит пределы: строка вместо числа отклоняется.
+        let as_text = check_limits(&tag, "STRING", &json!("1000")).unwrap_err();
+        assert_eq!(as_text.status, "REJECTED_TYPE_MISMATCH");
+        assert_eq!(limits_status(&tag, json!(-1e9)), Ok(()), "нижнего предела нет");
+        assert_eq!(
+            check_limits(&tag, "FLOAT", &json!(100.5)).unwrap_err().message,
+            "Значение 100.5 вне пределов записи тега: не больше 100"
+        );
+        // Целый тег: проверяется то, что будет записано (дробная часть отбрасывается).
+        let int = tag_with_limits("INT32", Some(1.0), None);
+        assert_eq!(limits_status(&int, json!(1.9)), Ok(()));
+        assert_eq!(limits_status(&int, json!(0.9)), Err("REJECTED_OUT_OF_RANGE"));
+        // Без пределов значение здесь не проверяется вовсе — дальше идёт прежний путь.
+        assert_eq!(limits_status(&tag_with_limits("STRING", None, None), json!("любой")), Ok(()));
     }
 
     fn job(id: &str) -> Job {

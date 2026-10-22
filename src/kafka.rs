@@ -394,7 +394,7 @@ pub async fn consume_commands<F, Fut>(
             .unwrap_or_else(|e| Err(anyhow::anyhow!("задача создания консьюмера: {e}")));
         match created {
             Ok(consumer) => {
-                info!("▶ Приём команд включён: {topic}");
+                info!("▶ Приём команд включён: {topic} (группа позиций {})", settings.commands_group);
                 consume_while_active(&consumer, &leadership, &mut role, &cancel, &handler).await;
                 // drop консьюмера ждёт его закрытия — не на потоке рантайма.
                 let _ = tokio::task::spawn_blocking(move || drop(consumer)).await;
@@ -466,10 +466,14 @@ fn preview(payload: &[u8]) -> String {
     }
 }
 
-/// Консьюмер с ручным назначением всех партиций топика команд: с закоммиченной позиции группы, а при первом запуске — с конца.
+/// Консьюмер с ручным назначением всех партиций топика команд: с закоммиченной позиции группы `GATEWAY_COMMANDS_GROUP_ID`,
+/// а при первом запуске — с конца.
 fn assigned_consumer(settings: &KafkaSettings, topic: &str) -> Result<StreamConsumer> {
-    let consumer: StreamConsumer =
-        settings.client_config().set("group.id", "scada-gateway-group").set("enable.auto.commit", "false").create()?;
+    let consumer: StreamConsumer = settings
+        .client_config()
+        .set("group.id", &settings.commands_group)
+        .set("enable.auto.commit", "false")
+        .create()?;
     let metadata = consumer.fetch_metadata(Some(topic), Duration::from_secs(10))?;
     let partitions: Vec<i32> = metadata
         .topics()

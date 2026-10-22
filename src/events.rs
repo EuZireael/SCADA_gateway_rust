@@ -51,7 +51,8 @@ use crate::model::Timestamp;
 /// Событие журнала шлюза: уходит в `event_log`, в Kafka и в REST.
 #[derive(Debug, Clone)]
 pub struct Event {
-    /// Тип: `CONNECTION`, `QUALITY_CHANGE`, `COMMAND`, `ALARM`, `ALARM_CLEARED`, `HEARTBEAT`, `SCRIPT`, `SYSTEM`, `HA`.
+    /// Тип: `CONNECTION`, `QUALITY_CHANGE`, `COMMAND`, `ALARM`, `ALARM_CLEARED`, `HEARTBEAT`, `SCRIPT`, `SYSTEM`, `HA`,
+    /// `CONFIG`.
     pub event_type: String,
     /// Источник.
     pub source: String,

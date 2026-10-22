@@ -229,6 +229,8 @@ mod tests {
             unit: None,
             min_value: None,
             max_value: None,
+            write_min: None,
+            write_max: None,
             modbus_address: Some(addr),
             modbus_type: None,
             modbus_unit_id: None,

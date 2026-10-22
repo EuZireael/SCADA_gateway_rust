@@ -76,7 +76,9 @@ sequenceDiagram
     Note over S: controllers.yaml → проверка → подключение к БД и синхронизация тегов (id нужны командам и истории)
     M->>S: build_leadership, build_kafka
     Note over S: роль (одиночный/пара), продюсер Kafka, создание топиков
-    M->>M: писатель событий, Scripts::load, App::new
+    M->>S: писатель событий, spawn_opcua_cert
+    Note over S: сертификат OPC UA-клиента: выпустить или прочитать, проверить ключ и URI, следить за сроком
+    M->>M: Scripts::load, App::new
     Note over M: ошибка скрипта при старте — ошибка старта
     M->>S: spawn_pollers, spawn_commands, spawn_http
     M->>M: ждать SIGTERM / Ctrl-C
@@ -166,7 +168,8 @@ flowchart TD
     D -->|"да"| R1["REJECTED_EXPIRED"]
     D -->|"нет"| E["command::execute"]
     E --> G{"Modbus или writable=false?"} -->|"да"| R3["REJECTED_NOT_WRITABLE"]
-    G -->|"нет"| H["скрипт канала: write(), затем coerce по типу тега<br/>(OPC UA — по типу узла)"]
+    G -->|"нет"| P{"writeMin/writeMax заданы<br/>и значение вне них?"} -->|"да"| R5["REJECTED_OUT_OF_RANGE"]
+    P -->|"нет"| H["скрипт канала: write(), затем coerce по типу тега<br/>(OPC UA — по типу узла)"]
     H -->|"ошибка"| R4["REJECTED_TYPE_MISMATCH"]
     H -->|"ок"| I{"протокол"}
     I -->|"OPC UA"| J["Write → статус сервера"]
@@ -176,7 +179,7 @@ flowchart TD
     L -->|"нет"| N["APPLIED"]
     M --> N
     K --> N
-    N & R1 & R2 & R3 & R4 --> O["scada-command-results + событие COMMAND + метрика"]
+    N & R1 & R2 & R3 & R4 & R5 --> O["scada-command-results + событие COMMAND + метрика"]
 ```
 
 Решения, которые стоит знать:

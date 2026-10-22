@@ -25,6 +25,10 @@ fn main() -> Result<()> {
     if std::env::args().nth(1).as_deref() == Some("healthcheck") {
         std::process::exit(if healthcheck() { 0 } else { 1 });
     }
+    // `scada-gateway opcua-cert [renew]` — сертификат OPC UA-клиента: показать или перевыпустить.
+    if std::env::args().nth(1).as_deref() == Some("opcua-cert") {
+        std::process::exit(opcua_cert(std::env::args().nth(2).as_deref()));
+    }
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run())
 }
 
@@ -42,6 +46,42 @@ fn healthcheck() -> bool {
     let mut resp = String::new();
     let _ = s.read_to_string(&mut resp);
     resp.split_whitespace().nth(1) == Some("200") && resp.contains(r#""status":"UP""#)
+}
+
+/// Сертификат OPC UA-клиента из тех же настроек окружения, что у шлюза: без аргумента — показать, `renew` —
+/// перевыпустить самоподписанный (прежняя пара остаётся рядом с суффиксом `.bak`).
+fn opcua_cert(action: Option<&str>) -> i32 {
+    use scada_gateway::opcua_cert as cert;
+    let run = || -> Result<()> {
+        let settings = scada_gateway::config::opcua_cert_from_env()?;
+        let now = chrono::Utc::now();
+        match action {
+            None | Some("show") => match cert::current(&settings)? {
+                Some(c) => println!("{}", cert::describe(&c, now)),
+                None => println!(
+                    "Сертификата OPC UA-клиента в {} ещё нет: шлюз выпустит его при запуске (или `opcua-cert renew`)",
+                    settings.pki_dir.display()
+                ),
+            },
+            Some("renew") => {
+                let c = cert::renew(&settings)?;
+                println!("{}", cert::describe(&c, now));
+                println!(
+                    "Внесите новый сертификат в доверенные на каждом ПЛК (файл выше). Шлюз берёт его при следующем \
+                     подключении; чтобы перейти сразу — перезапустите шлюз."
+                );
+            }
+            Some(other) => anyhow::bail!("неизвестное действие «{other}»: opcua-cert [show|renew]"),
+        }
+        Ok(())
+    };
+    match run() {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("opcua-cert: {e:#}");
+            1
+        }
+    }
 }
 
 /// Запуск шлюза по шагам и ожидание сигнала остановки; порядок шагов — в `docs/ARCHITECTURE.md`.
@@ -65,6 +105,8 @@ async fn run() -> Result<()> {
         metrics.clone(),
         tasks.cancel.clone(),
     ));
+
+    startup::spawn_opcua_cert(&settings, &station.controllers, &metrics, &events, &mut tasks).await?;
 
     // Пользовательские скрипты: ошибка при старте — ошибка старта шлюза.
     let tag_names: Vec<String> =
@@ -108,11 +150,18 @@ async fn run() -> Result<()> {
 
     // Горячее резервирование: выборы и журнал смены роли.
     let blind_app = app.clone();
+    // Отметка станции — по её контроллерам: экземпляр другой станции в той же группе выборов виден и в неё не вступает.
+    let station_check = ha::StationCheck::new(
+        ha::StationMark::of(app.controllers.iter().map(|c| c.ctrl.name.as_str())),
+        events.clone(),
+        app.metrics.ha_foreign_members.clone(),
+    );
     let elector = ha::spawn(
         ha_settings,
         kafka_settings,
         leadership.clone(),
         Arc::new(move || blind_app.all_links_down()),
+        station_check,
         tasks.cancel.clone(),
     );
     if leadership.is_ha_enabled() {
