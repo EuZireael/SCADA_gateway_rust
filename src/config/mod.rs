@@ -61,7 +61,16 @@ pub struct KafkaSettings {
 impl KafkaSettings {
     /// Заготовка конфигурации клиента: брокеры и свойства безопасности. Остальное клиент задаёт сам.
     pub fn client_config(&self) -> rdkafka::ClientConfig {
+        self.client_config_with(&[])
+    }
+
+    /// То же со значениями по умолчанию, которые `KAFKA_CLIENT_*` перекрывает: они ставятся до пользовательских свойств.
+    /// Свойства, от которых зависит семантика (см. [`FIXED_CLIENT_PROPERTIES`]), вызывающий ставит после — поверх.
+    pub fn client_config_with(&self, defaults: &[(&str, &str)]) -> rdkafka::ClientConfig {
         let mut c = rdkafka::ClientConfig::new();
+        for (k, v) in defaults {
+            c.set(*k, *v);
+        }
         c.set("bootstrap.servers", &self.bootstrap_servers);
         for (k, v) in &self.client.0 {
             c.set(k, v);
@@ -75,7 +84,7 @@ mod db;
 mod env;
 mod station;
 
-pub use client_props::{ClientProperties, client_properties};
+pub use client_props::{ClientProperties, FIXED_CLIENT_PROPERTIES, client_properties};
 pub use db::{DbSettings, DbSsl, JdbcUrl, parse_jdbc_url};
 pub use env::Secret;
 use env::{api_token, default_instance_id, env_any, env_bool, env_ms, env_or, env_parse};
@@ -395,6 +404,19 @@ mod tests {
         assert!(!shown.contains("p@ss"), "пароль не должен печататься: {shown}");
         assert!(!p.summary().contains("p@ss"));
         assert!(p.summary().contains("security.protocol=SASL_SSL"));
+    }
+
+    #[test]
+    fn properties_the_gateway_fixes_are_reported_as_ignored() {
+        let p = super::client_properties([
+            ("KAFKA_CLIENT_ENABLE_IDEMPOTENCE".to_string(), "false".to_string()),
+            ("KAFKA_CLIENT_BATCH_SIZE".to_string(), "250000".to_string()),
+            ("KAFKA_CLIENT_GROUP_ID".to_string(), "x".to_string()),
+        ]);
+        assert_eq!(p.ignored(), ["enable.idempotence", "group.id"]);
+        assert!(
+            super::client_properties([("KAFKA_CLIENT_BATCH_SIZE".to_string(), "1".to_string())]).ignored().is_empty()
+        );
     }
 
     #[test]

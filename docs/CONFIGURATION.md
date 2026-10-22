@@ -71,8 +71,16 @@
 | `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` | — | учётные данные SASL |
 | `KAFKA_SSL_CA_LOCATION` | — | корневой сертификат брокера |
 | `KAFKA_SSL_CERTIFICATE_LOCATION`, `KAFKA_SSL_KEY_LOCATION`, `KAFKA_SSL_KEY_PASSWORD` | — | клиентский сертификат и ключ (mTLS) |
-| `KAFKA_CLIENT_<СВОЙСТВО>` | — | любое свойство librdkafka: `KAFKA_CLIENT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM=none` → `ssl.endpoint.identification.algorithm`; перекрывает именованные. Неизвестное свойство останавливает запуск |
+| `KAFKA_CLIENT_<СВОЙСТВО>` | — | любое свойство librdkafka: `KAFKA_CLIENT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM=none` → `ssl.endpoint.identification.algorithm`; перекрывает именованные и значения продюсера по умолчанию (`client.id`, `acks`, `compression.type`, `linger.ms`, `batch.size`, `message.timeout.ms`: `KAFKA_CLIENT_BATCH_SIZE=250000`). Неизвестное свойство останавливает запуск; свойства, которые шлюз задаёт сам (см. ниже), игнорируются с предупреждением |
 | `SPRING_KAFKA_PROPERTIES_SECURITY_PROTOCOL`, `…_SASL_MECHANISM`, `…_SASL_JAAS_CONFIG` | — | как у Java-шлюза; из JAAS берутся `username` и `password` |
+
+**Что `KAFKA_CLIENT_*` не перекрывает.** Идемпотентность продюсера (`enable.idempotence=true`: от неё порядок и отсутствие дублей при
+повторной отправке), а у консьюмеров команд, настроек тегов и выборов резерва — `group.id`, `enable.auto.commit`,
+`auto.offset.reset`, `allow.auto.create.topics`, `session.timeout.ms`, `heartbeat.interval.ms`, `max.poll.interval.ms` и
+`partition.assignment.strategy`: группа, позиции и состав группы выборов определяются настройками `GATEWAY_COMMANDS_GROUP_ID` и
+`GATEWAY_HA_*`. Заданное в окружении значение такого свойства не применяется, шлюз пишет об этом предупреждение при запуске. Другие
+значения по умолчанию перекрываются, но не все сочетания допустимы для librdkafka: например, `acks=1` вместе с идемпотентным
+продюсером он отвергнет, и шлюз не запустится — с понятной ошибкой.
 
 Пароли и ключи в журнал и `Debug` не попадают. Свойства безопасности применяются ко всем клиентам шлюза: продюсеру,
 консьюмеру команд, консьюмеру выборов и администратору топиков.
