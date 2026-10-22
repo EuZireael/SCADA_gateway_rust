@@ -83,7 +83,7 @@ docker run -d --name scada-gateway -p 8888:8888 \
   -v $PWD/controllers.yaml:/app/config/controllers.yaml:ro \
   -v scada-gateway-pki:/app/pki \
   -e SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092 -e DB_ENABLED=false \
-  ghcr.io/euzireael/scada_rust:v0.4.1
+  ghcr.io/euzireael/scada_rust:v0.5.0
 ```
 
 ### Из исходников
