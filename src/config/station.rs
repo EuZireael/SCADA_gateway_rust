@@ -35,6 +35,8 @@ pub struct ServerConfig {
     pub username: Option<String>,
     /// Пароль пользователя OPC UA; в файл лучше писать `${ПЕРЕМЕННАЯ}`.
     pub password: Option<String>,
+    /// Как получать значения OPC UA: `poll` (по умолчанию — Read каждый цикл) или `subscription` (подписки).
+    pub acquisition: Option<String>,
     /// Включён ли контроллер; по умолчанию `false` — выключенный не опрашивается и не проверяется.
     #[serde(default)]
     pub enabled: bool,
@@ -59,6 +61,15 @@ impl ServerConfig {
             bail!(
                 "контроллер {:?}: security/username/password поддерживаются только для OPC UA (endpoint {}); \
                  для Modbus и PAC защиты на уровне протокола нет — не задавайте их, чтобы не думать, что канал защищён",
+                self.name,
+                self.endpoint
+            );
+        }
+        let acquisition = crate::model::Acquisition::parse(self.acquisition.as_deref())
+            .map_err(|e| anyhow::anyhow!("контроллер {:?}: {e}", self.name))?;
+        if !is_opcua && acquisition == crate::model::Acquisition::Subscription {
+            bail!(
+                "контроллер {:?}: acquisition: subscription поддерживается только для OPC UA (endpoint {})",
                 self.name,
                 self.endpoint
             );

@@ -20,6 +20,8 @@ curl -s localhost:8888/actuator/prometheus | grep -E 'scada_(telemetry|poll|proc
 (успевает ли шлюз за периодом), `scada_process_seconds`, `scada_telemetry_rows_dropped_total`.
 Результаты — в `docs/TELEMETRY_BY_EXCEPTION.md`.
 
+`ACQUISITION=subscription scripts/load_check.sh` — то же с подписками OPC UA вместо опроса (`docs/STRESS_TEST.md`).
+
 Автоматическая проверка (`scripts/load_check.sh`, job `load` в CI): 10 серверов × 2740 тегов, замер 30 с,
 падает при пропущенных циклах опроса, ошибках доставки в Kafka, перезапусках задач или памяти больше 500 МБ.
 На машине разработчика: 9 140 сообщений/с, ≈ 10 % одного ядра, 75 МБ, обработка цикла 14 мс.

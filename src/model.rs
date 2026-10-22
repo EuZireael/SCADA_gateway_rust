@@ -276,6 +276,27 @@ impl OpcSecurity {
     }
 }
 
+/// Как шлюз получает значения OPC UA-контроллера.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Acquisition {
+    /// Запрос Read всех «созревших» тегов каждый цикл (по умолчанию).
+    #[default]
+    Poll,
+    /// Подписки с MonitoredItems: сервер сам присылает изменения.
+    Subscription,
+}
+
+impl Acquisition {
+    /// `acquisition:` из `controllers.yaml`: `poll` (по умолчанию) или `subscription`; регистр не важен.
+    pub fn parse(text: Option<&str>) -> Result<Self, String> {
+        match text.map(|t| t.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("") | Some("poll") | Some("polling") => Ok(Acquisition::Poll),
+            Some("subscription") | Some("subscribe") => Ok(Acquisition::Subscription),
+            Some(other) => Err(format!("acquisition: {other:?} — допустимы poll и subscription")),
+        }
+    }
+}
+
 /// Контроллер со своими тегами.
 #[derive(Debug, Clone)]
 pub struct Controller {
@@ -293,6 +314,8 @@ pub struct Controller {
     pub tags: Vec<Arc<Tag>>,
     /// Защита соединения (только OPC UA).
     pub opc_security: OpcSecurity,
+    /// Опрос или подписки (только OPC UA).
+    pub acquisition: Acquisition,
 }
 
 impl Controller {
@@ -305,6 +328,7 @@ impl Controller {
             kind: ControllerKind::from_endpoint(&cfg.endpoint)?,
             enabled: cfg.enabled,
             opc_security: cfg.opc_security().unwrap_or_default(),
+            acquisition: Acquisition::parse(cfg.acquisition.as_deref()).unwrap_or_default(),
             tags: cfg
                 .tags
                 .iter()
@@ -561,6 +585,7 @@ mod tests {
             history: None,
         };
         let mut s = ServerConfig {
+            acquisition: None,
             id: None,
             name: "c".into(),
             endpoint: "opc.tcp://h:4840".into(),
