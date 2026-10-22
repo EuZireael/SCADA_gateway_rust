@@ -1,8 +1,8 @@
 # SCADA Gateway (Rust)
 
-[![CI/CD](https://github.com/EuZireael/SCADA_rust/actions/workflows/ci.yml/badge.svg)](https://github.com/EuZireael/SCADA_rust/actions/workflows/ci.yml)
-[![Audit](https://github.com/EuZireael/SCADA_rust/actions/workflows/audit.yml/badge.svg)](https://github.com/EuZireael/SCADA_rust/actions/workflows/audit.yml)
-[![Release](https://img.shields.io/github/v/release/EuZireael/SCADA_rust?sort=semver)](https://github.com/EuZireael/SCADA_rust/releases/latest)
+[![CI/CD](https://github.com/EuZireael/SCADA_gateway_rust/actions/workflows/ci.yml/badge.svg)](https://github.com/EuZireael/SCADA_gateway_rust/actions/workflows/ci.yml)
+[![Audit](https://github.com/EuZireael/SCADA_gateway_rust/actions/workflows/audit.yml/badge.svg)](https://github.com/EuZireael/SCADA_gateway_rust/actions/workflows/audit.yml)
+[![Release](https://img.shields.io/github/v/release/EuZireael/SCADA_gateway_rust?sort=semver)](https://github.com/EuZireael/SCADA_gateway_rust/releases/latest)
 
 **Шлюз сбора данных АСУ ТП.** Опрашивает промышленные контроллеры по **OPC UA**, **Modbus TCP** и **PAC**
 (driver-master, Savushkin/ptusa), публикует телеметрию, события и алармы в **Kafka** для монитора, принимает от него

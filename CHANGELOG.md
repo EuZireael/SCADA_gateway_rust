@@ -42,6 +42,11 @@
 - **Хороший статус узла без значения шлюз передавал как `null` с `GOOD`** — теперь `BAD`; `UInt64` больше `i64::MAX` тоже `BAD`, а не
   искажённое число.
 
+### Изменено
+- **Имя образа в CI задано явно — `ghcr.io/euzireael/scada_rust`** (#51). Раньше оно бралось из имени репозитория, и после
+  переименования репозитория в `SCADA_gateway_rust` образ публиковался бы как новый пакет `scada_gateway_rust` — без доступа у
+  тех, кто тянет `scada_rust`. Ссылки на репозиторий (значки в `README.md`, ссылки версий здесь) — на новый адрес.
+
 ### Безопасность
 - **`rustls-webpki` 0.103.15 → 0.103.16** (RUSTSEC-2026-0382: проверка сертификата могла принять отозванный из доверия
   промежуточный УЦ). Крейт проверяет сертификат сервера PostgreSQL при `sslmode=verify-ca`/`verify-full`.
@@ -417,5 +422,5 @@
 - Не перенесено: режим `recordDevice`/`fields`, JVM-метрики `/actuator/metrics/*`,
   политики безопасности OPC UA кроме None.
 
-[Unreleased]: https://github.com/EuZireael/SCADA_rust/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/EuZireael/SCADA_rust/releases/tag/v0.1.0
+[Unreleased]: https://github.com/EuZireael/SCADA_gateway_rust/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/EuZireael/SCADA_gateway_rust/releases/tag/v0.1.0
