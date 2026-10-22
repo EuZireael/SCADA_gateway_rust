@@ -1,16 +1,20 @@
-//! Команды записи из `scada-commands`: маршрутизация по протоколу, права, приведение типа,
-//! запись в ПЛК и результат в `scada-command-results`. Статусы — как у Java-шлюза.
+//! Команды записи из `scada-commands`: очередь своего контроллера, маршрутизация по протоколу, права, приведение
+//! типа, запись в ПЛК и результат в `scada-command-results`. Статусы — как у Java-шлюза.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use prometheus::{Histogram, IntGauge};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::app::{App, TagRef};
 use crate::events::Event;
 use crate::messages::{CommandMessage, CommandResultMessage, command_age_ms};
+use crate::metrics::Metrics;
 use crate::model::{self, Protocol, Quality, TagValue, Timestamp};
 use crate::opcua::{self, NodeId};
 use crate::pac::lua;
@@ -99,14 +103,18 @@ pub fn coerce(data_type: &str, value: &Value) -> Result<TagValue, String> {
     }
 }
 
-/// Выполнить команду.
-pub async fn execute(app: &App, cmd: &CommandMessage) -> Outcome {
-    let found = match (cmd.tag_id, cmd.tag_name.as_deref().filter(|n| !n.trim().is_empty())) {
+/// Тег команды и его контроллер: по `tagId`, иначе по `tagName`.
+fn resolve(app: &App, cmd: &CommandMessage) -> Result<TagRef, String> {
+    match (cmd.tag_id, cmd.tag_name.as_deref().filter(|n| !n.trim().is_empty())) {
         (Some(id), _) => app.tag_by_id(id).ok_or_else(|| format!("Тег не найден: {id}")),
         (None, Some(name)) => app.tag_by_name(name).ok_or_else(|| format!("Тег не найден по имени: {name}")),
         (None, None) => Err("Команда без tagId и tagName".to_string()),
-    };
-    let TagRef { tag, controller } = match found {
+    }
+}
+
+/// Выполнить команду.
+pub async fn execute(app: &App, cmd: &CommandMessage) -> Outcome {
+    let TagRef { tag, controller } = match resolve(app, cmd) {
         Ok(r) => r,
         Err(msg) => return Outcome::fail("REJECTED_UNKNOWN_TAG", msg),
     };
@@ -125,6 +133,9 @@ pub async fn execute(app: &App, cmd: &CommandMessage) -> Outcome {
         );
     }
     let data_type = cmd.data_type.as_deref().unwrap_or(&tag.data_type);
+    if let Err(outcome) = check_limits(&tag, data_type, &cmd.value) {
+        return outcome;
+    }
     // Скрипт канала с write(): значение оператора (инженерные единицы) → значение для ПЛК, до приведения
     // типа. Упал — ошибка значения, в ПЛК ничего не уходит.
     let scripted = app.scripts.has_chain(&tag.name);
@@ -147,6 +158,35 @@ pub async fn execute(app: &App, cmd: &CommandMessage) -> Outcome {
         Protocol::Pac => write_pac(app, &controller, write).await,
         Protocol::Modbus => unreachable!("отсечено выше"),
     }
+}
+
+/// Пределы `writeMin`/`writeMax` тега, включительно. Проверяется значение оператора — до скрипта канала, в тех же единицах,
+/// что телеметрия и пределы аларма; приведённое к типу (у целого тега 85,7 → 85 — то, что и будет записано).
+fn check_limits(tag: &model::Tag, data_type: &str, value: &Value) -> Result<(), Outcome> {
+    if tag.write_min.is_none() && tag.write_max.is_none() {
+        return Ok(());
+    }
+    let coerced = coerce(data_type, value)
+        .map_err(|e| Outcome::fail("REJECTED_TYPE_MISMATCH", format!("Значение не приводится к типу тега: {e}")))?;
+    // Строка в обход пределов не проходит: у тега с пределами значение команды — только число.
+    let Some(number) = coerced.as_f64() else {
+        return Err(Outcome::fail(
+            "REJECTED_TYPE_MISMATCH",
+            format!("У тега заданы пределы записи, значение должно быть числом: {coerced}"),
+        ));
+    };
+    let below = tag.write_min.is_some_and(|lo| number < lo);
+    let above = tag.write_max.is_some_and(|hi| number > hi);
+    if !below && !above {
+        return Ok(());
+    }
+    let limits = match (tag.write_min, tag.write_max) {
+        (Some(lo), Some(hi)) => format!("от {lo} до {hi}"),
+        (Some(lo), None) => format!("не меньше {lo}"),
+        (None, Some(hi)) => format!("не больше {hi}"),
+        (None, None) => unreachable!("проверено выше"),
+    };
+    Err(Outcome::fail("REJECTED_OUT_OF_RANGE", format!("Значение {number} вне пределов записи тега: {limits}")))
 }
 
 /// Приведённая к типу тега команда, готовая к записи в ПЛК.
@@ -316,40 +356,148 @@ impl Dedup {
     }
 }
 
-/// Обработать одну команду: дубли, возраст, запись, метрика, результат, событие.
-/// `record_timestamp_ms` — метка записи Kafka (по часам продюсера монитора).
-pub async fn handle(app: &App, dedup: &Dedup, cmd: CommandMessage, record_timestamp_ms: Option<i64>) {
+/// Команда, принятая из топика и ждущая исполнения в очереди своего контроллера.
+#[derive(Debug)]
+pub struct Job {
+    /// Команда.
+    pub cmd: CommandMessage,
+    /// Метка записи Kafka, мс (по часам продюсера монитора) — по ней считается возраст.
+    pub record_timestamp_ms: Option<i64>,
+    /// Когда команда встала в очередь.
+    queued: Instant,
+}
+
+impl Job {
+    /// Команда, только что принятая из топика.
+    pub fn new(cmd: CommandMessage, record_timestamp_ms: Option<i64>) -> Self {
+        Job { cmd, record_timestamp_ms, queued: Instant::now() }
+    }
+}
+
+/// Очередь одного контроллера. Приёмник — под асинхронным мьютексом: исполнитель, перезапущенный надзирателем после
+/// паники, продолжает ту же очередь.
+struct Queue {
+    tx: mpsc::UnboundedSender<Job>,
+    rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Job>>>,
+    depth: IntGauge,
+    wait: Histogram,
+}
+
+/// Очереди команд по контроллерам, у каждой свой исполнитель: контроллер, который не отвечает на запись, задерживает
+/// только свои команды. Внутри контроллера команды исполняются по одной в порядке топика, как и раньше: от порядка
+/// зависит итоговое значение, а проверка эффекта сравнивает значения до и после записи.
+pub struct Dispatcher {
+    queues: HashMap<String, Queue>,
+}
+
+impl Dispatcher {
+    /// Очереди для контроллеров станции; длина и ожидание — в `scada_command_queue` и `scada_command_wait_seconds`.
+    pub fn new<'a>(controllers: impl IntoIterator<Item = &'a str>, metrics: &Metrics) -> Self {
+        let queues = controllers
+            .into_iter()
+            .map(|name| {
+                let (tx, rx) = mpsc::unbounded_channel();
+                let queue = Queue {
+                    tx,
+                    rx: Arc::new(tokio::sync::Mutex::new(rx)),
+                    depth: metrics.command_queue.with_label_values(&[name]),
+                    wait: metrics.command_wait_seconds.with_label_values(&[name]),
+                };
+                (name.to_string(), queue)
+            })
+            .collect();
+        Dispatcher { queues }
+    }
+
+    /// Поставить команду в очередь контроллера; `Err` с командой — такого контроллера нет.
+    pub fn enqueue(&self, controller: &str, job: Job) -> Result<(), Box<Job>> {
+        let Some(queue) = self.queues.get(controller) else { return Err(Box::new(job)) };
+        queue.tx.send(job).map_err(|e| Box::new(e.0))?;
+        queue.depth.inc();
+        Ok(())
+    }
+
+    /// Исполнитель очереди контроллера: берёт команды по одной и ждёт исполнения каждой, пока не отменён.
+    pub async fn run<F, Fut>(&self, controller: &str, cancel: &CancellationToken, process: F)
+    where
+        F: Fn(Job) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let Some(queue) = self.queues.get(controller) else { return };
+        let mut rx = queue.rx.lock().await;
+        loop {
+            let job = tokio::select! {
+                _ = cancel.cancelled() => return,
+                job = rx.recv() => match job {
+                    Some(job) => job,
+                    None => return,
+                },
+            };
+            queue.depth.dec();
+            queue.wait.observe(job.queued.elapsed().as_secs_f64());
+            process(job).await;
+        }
+    }
+}
+
+/// Имя тега команды для журнала: `tagName`, иначе `#tagId`.
+fn tag_label(cmd: &CommandMessage) -> String {
+    cmd.tag_name.clone().or_else(|| cmd.tag_id.map(|id| format!("#{id}"))).unwrap_or_else(|| "?".into())
+}
+
+/// Принять команду из топика (вызывается по порядку топика): повтор — пропуск, тег не найден — ответ сразу, иначе —
+/// в очередь контроллера тега.
+pub fn submit(app: &App, dedup: &Dedup, queues: &Dispatcher, cmd: CommandMessage, record_timestamp_ms: Option<i64>) {
     if let Some(id) = cmd.command_id.as_deref().filter(|id| !id.is_empty())
         && dedup.is_duplicate(id)
     {
         warn!("⏭ Команда {id} уже обработана недавно — пропуск");
         return;
     }
-    let tag = cmd.tag_name.clone().or_else(|| cmd.tag_id.map(|id| format!("#{id}"))).unwrap_or_else(|| "?".into());
-    info!("← команда: {tag} = {}, от {}", cmd.value, cmd.requested_by.as_deref().unwrap_or("?"));
-    // Команда, пролежавшая в топике дольше предела (шлюзы стояли оба), в ПЛК не уходит: монитор её давно
-    // списал по таймауту, и запоздалая запись была бы для оператора неожиданной. Команды, пришедшие за
-    // время переключения пары (секунды), исполняются. Возраст — по часам монитора: нужен NTP.
+    info!("← команда: {} = {}, от {}", tag_label(&cmd), cmd.value, cmd.requested_by.as_deref().unwrap_or("?"));
+    let controller = match resolve(app, &cmd) {
+        Ok(TagRef { controller, .. }) => controller,
+        Err(msg) => return finish(app, &cmd, Outcome::fail("REJECTED_UNKNOWN_TAG", msg)),
+    };
+    if let Err(job) = queues.enqueue(&controller.ctrl.name, Job::new(cmd, record_timestamp_ms)) {
+        let msg = format!("Нет очереди команд контроллера {}", controller.ctrl.name);
+        finish(app, &job.cmd, Outcome::fail("FAILED_WRITE", msg));
+    }
+}
+
+/// Исполнить команду из очереди: возраст, запись, результат.
+pub async fn process(app: &App, job: Job) {
+    let cmd = &job.cmd;
+    // Команда, пролежавшая дольше предела (шлюзы стояли оба или очередь контроллера стояла за зависшей записью), в ПЛК
+    // не уходит: монитор её давно списал по таймауту, и запоздалая запись была бы для оператора неожиданной. Команды,
+    // пришедшие за время переключения пары (секунды), исполняются. Возраст — по часам монитора: нужен NTP.
     let max_age_ms = app.settings.gateway.command_max_age.as_millis() as i64;
-    let age = command_age_ms(&cmd, record_timestamp_ms, chrono::Utc::now().timestamp_millis());
+    let age = command_age_ms(cmd, job.record_timestamp_ms, chrono::Utc::now().timestamp_millis());
     let outcome = match age {
         Some(age) if age > max_age_ms => {
             warn!(
-                "⌛ Команда {} по {tag} устарела ({age} мс) — в ПЛК не отправлена",
-                cmd.command_id.as_deref().unwrap_or("?")
+                "⌛ Команда {} по {} устарела ({age} мс) — в ПЛК не отправлена",
+                cmd.command_id.as_deref().unwrap_or("?"),
+                tag_label(cmd)
             );
             Outcome::fail(
                 "REJECTED_EXPIRED",
                 format!("Команда устарела: {} c при пределе {} c", age / 1000, max_age_ms / 1000),
             )
         }
-        _ => execute(app, &cmd).await,
+        _ => execute(app, cmd).await,
     };
+    finish(app, cmd, outcome);
+}
+
+/// Исход команды — в метрику, журнал, `scada-command-results` и событие `COMMAND`.
+fn finish(app: &App, cmd: &CommandMessage, outcome: Outcome) {
     app.metrics.commands.with_label_values(&[outcome.status]).inc();
     if !outcome.success() {
         warn!(
-            "Команда {} по {tag}: {} — {}",
+            "Команда {} по {}: {} — {}",
             cmd.command_id.as_deref().unwrap_or("?"),
+            tag_label(cmd),
             outcome.status,
             outcome.message
         );
@@ -398,6 +546,186 @@ mod tests {
             }
         }
         assert!(coerce("FLOAT", &json!(null)).is_err());
+    }
+
+    fn tag_with_limits(data_type: &str, write_min: Option<f64>, write_max: Option<f64>) -> model::Tag {
+        let cfg = serde_json::from_value(json!({
+            "name": "t", "nodeId": "ns=2;s=1", "dataType": data_type, "enabled": true, "writable": true,
+            "writeMin": write_min, "writeMax": write_max,
+        }))
+        .unwrap();
+        model::Tag::from_config(&cfg)
+    }
+
+    fn limits_status(tag: &model::Tag, value: Value) -> Result<(), &'static str> {
+        check_limits(tag, &tag.data_type, &value).map_err(|o| o.status)
+    }
+
+    #[test]
+    fn write_limits_are_inclusive() {
+        let tag = tag_with_limits("FLOAT", Some(0.0), Some(85.5));
+        for ok in [json!(0), json!(85.5), json!("85.5"), json!(42.1)] {
+            assert_eq!(limits_status(&tag, ok.clone()), Ok(()), "{ok}");
+        }
+        for out in [json!(-0.001), json!(85.50001), json!(850), json!("850")] {
+            assert_eq!(limits_status(&tag, out.clone()), Err("REJECTED_OUT_OF_RANGE"), "{out}");
+        }
+        let err = check_limits(&tag, "FLOAT", &json!(850)).unwrap_err();
+        assert!(!err.success() && err.applied.is_none());
+        assert_eq!(err.message, "Значение 850 вне пределов записи тега: от 0 до 85.5");
+    }
+
+    #[test]
+    fn write_limits_reject_non_numbers_and_need_no_check_without_limits() {
+        let tag = tag_with_limits("FLOAT", None, Some(100.0));
+        // NaN и бесконечность не сравниваются с пределом — это ошибка значения, а не «в пределах».
+        for bad in [json!("NaN"), json!("inf"), json!("-Infinity"), json!(null), json!("abc")] {
+            assert_eq!(limits_status(&tag, bad.clone()), Err("REJECTED_TYPE_MISMATCH"), "{bad}");
+        }
+        // Тип из команды не обходит пределы: строка вместо числа отклоняется.
+        let as_text = check_limits(&tag, "STRING", &json!("1000")).unwrap_err();
+        assert_eq!(as_text.status, "REJECTED_TYPE_MISMATCH");
+        assert_eq!(limits_status(&tag, json!(-1e9)), Ok(()), "нижнего предела нет");
+        assert_eq!(
+            check_limits(&tag, "FLOAT", &json!(100.5)).unwrap_err().message,
+            "Значение 100.5 вне пределов записи тега: не больше 100"
+        );
+        // Целый тег: проверяется то, что будет записано (дробная часть отбрасывается).
+        let int = tag_with_limits("INT32", Some(1.0), None);
+        assert_eq!(limits_status(&int, json!(1.9)), Ok(()));
+        assert_eq!(limits_status(&int, json!(0.9)), Err("REJECTED_OUT_OF_RANGE"));
+        // Без пределов значение здесь не проверяется вовсе — дальше идёт прежний путь.
+        assert_eq!(limits_status(&tag_with_limits("STRING", None, None), json!("любой")), Ok(()));
+    }
+
+    fn job(id: &str) -> Job {
+        Job::new(serde_json::from_value(json!({"commandId": id, "tagName": "t", "value": 1})).unwrap(), None)
+    }
+
+    /// Журнал исполнения: какой контроллер какую команду взял.
+    type Log = Arc<Mutex<Vec<(String, String)>>>;
+
+    fn record(log: &Log, controller: &str, job: &Job) {
+        log.lock().unwrap().push((controller.to_string(), job.cmd.command_id.clone().unwrap()));
+    }
+
+    /// Контроллер «A» не отвечает: его исполнитель застрял на первой команде; команды «B» исполняются сразу и по порядку,
+    /// следующие команды «A» ждут в своей очереди.
+    #[tokio::test]
+    async fn hung_controller_does_not_delay_commands_to_others() {
+        let metrics = Metrics::new();
+        let queues = Arc::new(Dispatcher::new(["A", "B"], &metrics));
+        let (log, cancel): (Log, _) = (Log::default(), CancellationToken::new());
+        for name in ["A", "B"] {
+            let (queues, log, cancel) = (queues.clone(), log.clone(), cancel.clone());
+            tokio::spawn(async move {
+                queues
+                    .run(name, &cancel, |job| {
+                        record(&log, name, &job);
+                        async move {
+                            if name == "A" {
+                                std::future::pending::<()>().await; // запись не возвращается
+                            }
+                        }
+                    })
+                    .await
+            });
+        }
+        for (controller, id) in [("A", "a1"), ("B", "b1"), ("A", "a2"), ("B", "b2")] {
+            assert!(queues.enqueue(controller, job(id)).is_ok());
+        }
+        assert!(queues.enqueue("C", job("c1")).is_err(), "нет такого контроллера");
+        let done = tokio::time::timeout(Duration::from_secs(2), async {
+            while log.lock().unwrap().len() < 3 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(done.is_ok(), "команды B ждали A: {:?}", log.lock().unwrap());
+        let taken: Vec<_> = log.lock().unwrap().iter().filter(|(c, _)| c == "B").map(|(_, id)| id.clone()).collect();
+        assert_eq!(taken, ["b1", "b2"]);
+        assert_eq!(metrics.command_queue.with_label_values(&["A"]).get(), 1, "a2 ждёт за зависшей a1");
+        assert_eq!(metrics.command_queue.with_label_values(&["B"]).get(), 0);
+        assert_eq!(metrics.command_wait_seconds.with_label_values(&["B"]).get_sample_count(), 2);
+        cancel.cancel();
+    }
+
+    /// Команды одного контроллера — строго по одной и в порядке поступления, даже если исполнение занимает разное время.
+    #[tokio::test]
+    async fn commands_of_one_controller_run_one_at_a_time_in_order() {
+        let metrics = Metrics::new();
+        let queues = Arc::new(Dispatcher::new(["A"], &metrics));
+        let (log, cancel): (Log, _) = (Log::default(), CancellationToken::new());
+        let busy = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker = {
+            let (queues, log, cancel, busy) = (queues.clone(), log.clone(), cancel.clone(), busy.clone());
+            tokio::spawn(async move {
+                queues
+                    .run("A", &cancel, |job| {
+                        let (log, busy) = (log.clone(), busy.clone());
+                        async move {
+                            assert_eq!(busy.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 0, "две команды сразу");
+                            let n: u64 = job.cmd.command_id.as_deref().unwrap()[1..].parse().unwrap();
+                            tokio::time::sleep(Duration::from_millis((20 - n) % 7)).await;
+                            record(&log, "A", &job);
+                            busy.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    })
+                    .await
+            })
+        };
+        let ids: Vec<String> = (0..20).map(|i| format!("c{i}")).collect();
+        for id in &ids {
+            queues.enqueue("A", job(id)).unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while log.lock().unwrap().len() < ids.len() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("все команды исполнены");
+        let order: Vec<String> = log.lock().unwrap().iter().map(|(_, id)| id.clone()).collect();
+        assert_eq!(order, ids);
+        cancel.cancel();
+        worker.await.expect("исполнитель не паниковал");
+    }
+
+    /// Исполнитель, перезапущенный после остановки (паника, перезапуск надзирателем), продолжает ту же очередь.
+    #[tokio::test]
+    async fn restarted_worker_continues_the_same_queue() {
+        let metrics = Metrics::new();
+        let queues = Arc::new(Dispatcher::new(["A"], &metrics));
+        let log = Log::default();
+        let start = |cancel: CancellationToken| {
+            let (queues, log) = (queues.clone(), log.clone());
+            tokio::spawn(async move {
+                queues
+                    .run("A", &cancel, |job| {
+                        record(&log, "A", &job);
+                        async {}
+                    })
+                    .await
+            })
+        };
+        let first = CancellationToken::new();
+        let worker = start(first.clone());
+        queues.enqueue("A", job("x1")).unwrap();
+        while log.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        first.cancel();
+        worker.await.unwrap();
+        queues.enqueue("A", job("x2")).unwrap();
+        assert_eq!(metrics.command_queue.with_label_values(&["A"]).get(), 1);
+        let second = CancellationToken::new();
+        let worker = start(second.clone());
+        while log.lock().unwrap().len() < 2 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(log.lock().unwrap()[1].1, "x2");
+        second.cancel();
+        worker.await.unwrap();
     }
 
     #[test]

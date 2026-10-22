@@ -4,7 +4,7 @@
 //!   * каждый тег controllers.yaml приходит в телеметрию GOOD, тело — ровно
 //!     {value, quality, timestamp}, value типизирован по dataType, timestamp — число;
 //!   * команды через Kafka: запись по OPC UA и PAC применяется и доходит до телеметрии,
-//!     запрещённое отклоняется с тем же статусом, что у Java-шлюза;
+//!     запрещённое отклоняется с тем же статусом, что у Java-шлюза (значение вне writeMin/writeMax — своим);
 //!   * с БД (IT_DATABASE_URL): журнал событий, REST; метрики; остановка по SIGTERM.
 //!
 //!   cargo test --test e2e -- --ignored      (симулятор + Kafka, см. tests/common)
@@ -134,6 +134,9 @@ async fn gateway_end_to_end() {
         ("Барановичи-1.BN1_MCA1.Статистика_линии_1.OBJECT1.RT_PAR_F[119]", json!(1), "REJECTED_NOT_WRITABLE"), // Modbus
         ("Нет.Такого.Тега", json!(1), "REJECTED_UNKNOWN_TAG"),
         (opc_rw, json!("abc"), "REJECTED_TYPE_MISMATCH"),
+        // writeMin: 0, writeMax: 1 в controllers.yaml: в ПЛК не уходит ни по OPC UA, ни по PAC.
+        (opc_rw, json!(5), "REJECTED_OUT_OF_RANGE"),
+        (pac_rw, json!(-1), "REJECTED_OUT_OF_RANGE"),
     ] {
         let r = command(&gw, &producer, &results, tag, value).await;
         assert_eq!(r["status"], status, "{tag}: {r}");

@@ -148,6 +148,7 @@ async fn ha(State(app): State<Arc<App>>) -> Json<Value> {
         "role": if l.is_active() { "ACTIVE" } else { "STANDBY" },
         "since": l.since().to_rfc3339(),
         "group": l.group_id(),
+        "foreignMembers": l.foreign_members(),
     }))
 }
 

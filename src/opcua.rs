@@ -32,6 +32,7 @@ use tokio::time::timeout;
 use tracing::{info, warn};
 
 use crate::model::{self, OpcMode, OpcPolicy, OpcSecurity, Quality, Tag, TagValue, Timestamp};
+use crate::opcua_cert::{self, CertSettings};
 
 /// Узлов в одном запросе чтения, если сервер не требует меньше.
 pub const READ_CHUNK: usize = 500;
@@ -104,8 +105,8 @@ async fn pick_address(addrs: &[SocketAddr], probe_timeout: Duration) -> Option<S
 pub struct ConnectOptions {
     /// Политика и режим канала, пользователь.
     pub security: OpcSecurity,
-    /// Хранилище сертификатов клиента.
-    pub pki_dir: std::path::PathBuf,
+    /// Сертификат клиента и каталог PKI (там же `trusted/` и `rejected/` для сертификатов серверов).
+    pub cert: CertSettings,
     /// Доверять любому сертификату сервера. Для канала без защиты не имеет значения.
     pub trust_server_certs: bool,
 }
@@ -115,7 +116,7 @@ impl ConnectOptions {
     pub fn insecure() -> Self {
         ConnectOptions {
             security: OpcSecurity::default(),
-            pki_dir: std::env::temp_dir().join("scada-gateway-pki"),
+            cert: CertSettings::in_dir(std::env::temp_dir().join("scada-gateway-pki")),
             trust_server_certs: true,
         }
     }
@@ -124,7 +125,7 @@ impl ConnectOptions {
     pub fn for_controller(security: &OpcSecurity, settings: &crate::config::GatewaySettings) -> Self {
         ConnectOptions {
             security: security.clone(),
-            pki_dir: settings.opcua_pki_dir.clone(),
+            cert: settings.opcua_cert.clone(),
             trust_server_certs: settings.opcua_trust_server_certs,
         }
     }
@@ -162,15 +163,25 @@ impl OpcConnection {
         let url = reachable_url(url, op_timeout.min(PROBE_TIMEOUT)).await;
         let url = url.as_str();
         let secure = opts.security.is_secure();
-        let mut client = ClientBuilder::new()
-            .application_name("SCADA Gateway")
-            .application_uri("urn:scada:gateway")
-            .product_uri("urn:scada:gateway")
-            .pki_dir(&opts.pki_dir)
-            // Самоподписанный сертификат клиента (создаётся один раз в pki_dir): для политики
-            // None он не нужен, но без него клиент при каждом подключении пишет ошибки в лог. При
-            // защищённом канале сервер должен ему доверять (у сервера — своё хранилище).
-            .create_sample_keypair(true)
+        // Сертификат клиента: свой из настроек или самоподписанный (выпускается один раз, под блокировкой — контроллеры
+        // подключаются одновременно). Для канала None он не нужен, но без него клиент на каждом подключении пишет
+        // ошибки в журнал. При защищённом канале сервер должен ему доверять (у сервера — своё хранилище).
+        let cert_settings = opts.cert.clone();
+        let cert = match tokio::task::spawn_blocking(move || opcua_cert::ensure(&cert_settings)).await? {
+            Ok(cert) => Some(cert),
+            Err(e) if secure => return Err(e.context(format!("OPC UA {url}: нет сертификата клиента"))),
+            Err(_) => None,
+        };
+        let mut builder = ClientBuilder::new()
+            .application_name(opcua_cert::APPLICATION_NAME)
+            .application_uri(&opts.cert.application_uri)
+            .product_uri(&opts.cert.application_uri)
+            .pki_dir(&opts.cert.pki_dir)
+            .create_sample_keypair(false);
+        if let Some(cert) = &cert {
+            builder = builder.certificate_path(&cert.cert_path).private_key_path(&cert.key_path);
+        }
+        let mut client = builder
             // Сертификат сервера: без защиты канала проверять нечего; с защитой — только из `trusted/`,
             // если не включено GATEWAY_OPCUA_TRUST_SERVER_CERTS.
             .trust_server_certs(opts.trust_server_certs || !secure)

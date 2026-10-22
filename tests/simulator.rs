@@ -13,6 +13,7 @@ use scada_gateway::modbus::{self, ModbusClient};
 use scada_gateway::model::OpcSecurity;
 use scada_gateway::model::{ControllerKind, Protocol, Quality, TagValue};
 use scada_gateway::opcua::{self, ConnectOptions, OpcConnection};
+use scada_gateway::opcua_cert::CertSettings;
 use scada_gateway::pac::{self, PacConnection};
 
 const NEED_SIM: &str = "нужен симулятор: SIM_HOST=… cargo test -- --ignored";
@@ -226,7 +227,7 @@ fn creds() -> (String, String) {
 fn secure_opts(security: &str, user: Option<(&str, &str)>, trust_all: bool, pki: &std::path::Path) -> ConnectOptions {
     ConnectOptions {
         security: OpcSecurity::parse(Some(security), user.map(|u| u.0), user.map(|u| u.1)).unwrap(),
-        pki_dir: pki.to_path_buf(),
+        cert: CertSettings::in_dir(pki),
         trust_server_certs: trust_all,
     }
 }

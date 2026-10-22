@@ -2145,7 +2145,7 @@ opcua:
         - {name: "Барановичи-1.BN1_MCA1.LS_P_DT.LS8.P_DT", nodeId: "ns=2;s=3743", channelId: 3743, deviceName: "LS8", fieldName: "P_DT", deviceType: "LS", dataType: FLOAT, pollingRate: 2000, enabled: true, writable: true}
         - {name: "Барановичи-1.BN1_MCA1.LS_P_DT.LS9.P_DT", nodeId: "ns=2;s=3746", channelId: 3746, deviceName: "LS9", fieldName: "P_DT", deviceType: "LS", dataType: FLOAT, pollingRate: 2000, enabled: true, writable: true}
         - {name: "Барановичи-1.BN1_MCA1.M_ST.M3.ST", nodeId: "ns=2;s=3764", channelId: 3764, deviceName: "M3", fieldName: "ST", deviceType: "M", dataType: INT32, pollingRate: 2000, enabled: true, writable: true}
-        - {name: "Барановичи-1.BN1_MCA1.M_M.M3.M", nodeId: "ns=2;s=3765", channelId: 3765, deviceName: "M3", fieldName: "M", deviceType: "M", dataType: INT32, pollingRate: 2000, enabled: true, writable: true}
+        - {name: "Барановичи-1.BN1_MCA1.M_M.M3.M", nodeId: "ns=2;s=3765", channelId: 3765, deviceName: "M3", fieldName: "M", deviceType: "M", dataType: INT32, pollingRate: 2000, enabled: true, writable: true, writeMin: 0, writeMax: 1}
         # --- 04.09.2026: недостающие каналы из бэкафилла .cdbx (scada-fsw), без архивных данных ---
         # --- 10.09.2026: датчики, открытые для ручного ввода (рецепт «Дезинфекция»); TE2.V и LINE1FQT1.V перенесены с WAGO на OPC UA ---
     - id: wago-001
@@ -2412,7 +2412,7 @@ opcua:
         - {name: "Барановичи-1.BN1_MCA1.V_ST_1.LINE1V1106.ST", nodeId: "pac:453", channelId: 453, deviceName: "LINE1V1106", fieldName: "ST", deviceType: "V", protocol: pac, dataType: INT32, pollingRate: 2000, enabled: true, writable: true}
         - {name: "Барановичи-1.BN1_MCA1.V_ST_1.LINE1V1151.ST", nodeId: "pac:455", channelId: 455, deviceName: "LINE1V1151", fieldName: "ST", deviceType: "V", protocol: pac, dataType: INT32, pollingRate: 2000, enabled: true, writable: true}
         - {name: "Барановичи-1.BN1_MCA1.V_ST_1.LINE1V1152.ST", nodeId: "pac:457", channelId: 457, deviceName: "LINE1V1152", fieldName: "ST", deviceType: "V", protocol: pac, dataType: INT32, pollingRate: 2000, enabled: true, writable: true}
-        - {name: "Барановичи-1.BN1_MCA1.V_M_1.LINE1V0.M", nodeId: "pac:460", channelId: 460, deviceName: "LINE1V0", fieldName: "M", deviceType: "V", protocol: pac, dataType: INT32, pollingRate: 2000, enabled: true, writable: true}
+        - {name: "Барановичи-1.BN1_MCA1.V_M_1.LINE1V0.M", nodeId: "pac:460", channelId: 460, deviceName: "LINE1V0", fieldName: "M", deviceType: "V", protocol: pac, dataType: INT32, pollingRate: 2000, enabled: true, writable: true, writeMin: 0, writeMax: 1}
         - {name: "Барановичи-1.BN1_MCA1.V_M_1.LINE1V1.M", nodeId: "pac:462", channelId: 462, deviceName: "LINE1V1", fieldName: "M", deviceType: "V", protocol: pac, dataType: INT32, pollingRate: 2000, enabled: true, writable: true}
         - {name: "Барановичи-1.BN1_MCA1.V_M_1.LINE1V10.M", nodeId: "pac:464", channelId: 464, deviceName: "LINE1V10", fieldName: "M", deviceType: "V", protocol: pac, dataType: INT32, pollingRate: 2000, enabled: true, writable: true}
         - {name: "Барановичи-1.BN1_MCA1.V_M_1.LINE1V11.M", nodeId: "pac:466", channelId: 466, deviceName: "LINE1V11", fieldName: "M", deviceType: "V", protocol: pac, dataType: INT32, pollingRate: 2000, enabled: true, writable: true}

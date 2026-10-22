@@ -28,7 +28,7 @@
 | Время | часы шлюза и монитора синхронизированы по NTP: возраст команды считается по ним, расхождение даст `REJECTED_EXPIRED` |
 | Kafka | брокер, топики (см. ниже), доступ только у шлюза и монитора: запись в `scada-commands` равна праву писать в ПЛК |
 | Безопасность | `GATEWAY_API_TOKEN` задан, порт 8888 закрыт файрволом, `sslmode=require` к БД — `docs/OPERATIONS.md`, чек-лист |
-| OPC UA с защитой | сертификат шлюза внесён в доверенные на ПЛК; сертификат ПЛК переложен из `pki/rejected/` в `pki/trusted/` |
+| OPC UA с защитой | том `/app/pki` именованный (`-v scada-gateway-pki:/app/pki`), иначе пересоздание контейнера даст новый сертификат; сертификат шлюза внесён в доверенные на ПЛК (у пары резерва — оба); срок сертификата (`scada-gateway opcua-cert`) больше срока пробы; сертификат ПЛК переложен из `pki/rejected/` в `pki/trusted/` |
 | Кто на связи | человек, который может остановить технологический процесс на самом оборудовании (шлюз не заменяет аварийный останов) |
 
 Не запускать пробу на оборудовании, которое сейчас управляет опасным процессом, пока не пройдены ступени 1–3.
@@ -53,6 +53,7 @@
 
 ```sh
 docker run --rm -p 8888:8888 -v $PWD/controllers.yaml:/app/config/controllers.yaml:ro \
+  -v scada-gateway-pki:/app/pki \
   -e DB_ENABLED=false -e KAFKA_ENABLED=false -e GATEWAY_API_TOKEN=проба-токен-проба-токен \
   ghcr.io/euzireael/scada_rust:v0.4.0
 ```
@@ -149,6 +150,7 @@ kafka-console-consumer.sh --bootstrap-server БРОКЕР --topic pilot-command-
 | `FAILED_NOT_APPLIED` | принял, но значение не изменилось (программа не разрешает действие); для PAC этот статус недоступен — код 0 значит «принято», проверять по значению |
 | `REJECTED_NOT_WRITABLE` | тег не `writable` или это Modbus (Modbus не пишется никогда) |
 | `REJECTED_TYPE_MISMATCH` | значение не приводится к типу тега |
+| `REJECTED_OUT_OF_RANGE` | значение вне `writeMin`/`writeMax` тега — в ПЛК не ушло |
 | `REJECTED_EXPIRED` | команда старше `GATEWAY_COMMANDS_MAX_AGE_MS`: проверьте часы |
 | `FAILED_NO_CONNECTION`, `FAILED_WRITE` | связи нет или сервер отклонил запись; подробности в `message` и журнале |
 
