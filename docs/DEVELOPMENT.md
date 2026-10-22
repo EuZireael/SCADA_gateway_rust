@@ -143,7 +143,6 @@ flowchart LR
     stack["stack<br/>docker compose + сбои"]
     load["load<br/>27 400 тегов"]
     compat["compat<br/>OPC UA против OPC PLC"]
-    compat["compat<br/>OPC UA против OPC PLC"]
     integration & docker & stack & load & compat --> release["release (только тег v*)<br/>GitHub Release"]
 ```
 
