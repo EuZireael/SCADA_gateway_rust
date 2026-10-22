@@ -17,8 +17,11 @@ use crate::config::IdentityConfig;
 use crate::events::Event;
 use crate::identity::{self, Mismatch};
 use crate::modbus::{self, ModbusClient};
-use crate::model::{ControllerKind, Protocol, Quality, Reading, Tag, Timestamp};
-use crate::opcua::{self, ConnectOptions, NodeReport, OpcConnection, PreparedNodes, ReadValueId};
+use crate::model::{Acquisition, ControllerKind, Protocol, Quality, Reading, Tag, Timestamp};
+use crate::opcua::{
+    self, ConnectOptions, DataValue, NodeReport, OpcConnection, PreparedNodes, ReadValueId, Subscription,
+    SubscriptionEvent,
+};
 use crate::pac::{self, PacConnection};
 use crate::schedule::PollSchedule;
 use crate::telemetry::{Processor, all_bad};
@@ -379,17 +382,28 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
         handle.set_opc_connection(Some(conn.clone()));
         info!("✅ OPC UA socket up: {} — опрос запущен", handle.ctrl.name);
 
-        let mut tick = ticker(&handle);
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = tick.tick() => {}
-                _ = handle.poll_requested(gw.poll_after_write) => {}
-            }
-            if let Cycle::Reconnect =
-                read_opcua_cycle(&app, &handle, &conn, &mut processor, &mut schedule, &tags, &nodes).await
-            {
-                break;
+        // Подписки вместо опроса (`acquisition: subscription`); не удались — этот сеанс идёт опросом, подключение не рвётся.
+        let subscription = if handle.ctrl.acquisition == Acquisition::Subscription {
+            start_subscription(&app, &handle, &conn, &tags, &nodes).await
+        } else {
+            None
+        };
+        if let Some(subscription) = subscription {
+            run_subscription(&app, &handle, &conn, &mut processor, &mut schedule, &tags, &nodes, subscription, &cancel)
+                .await;
+        } else {
+            let mut tick = ticker(&handle);
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = tick.tick() => {}
+                    _ = handle.poll_requested(gw.poll_after_write) => {}
+                }
+                if let Cycle::Reconnect =
+                    read_opcua_cycle(&app, &handle, &conn, &mut processor, &mut schedule, &tags, &nodes).await
+                {
+                    break;
+                }
             }
         }
         handle.set_opc_connection(None);
@@ -397,6 +411,214 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
         conn.close().await;
         if cancel.is_cancelled() || !pause(&cancel, gw.reconnect_interval.min(Duration::from_secs(1))).await {
             return;
+        }
+    }
+}
+
+// -------------------------------------------------------------------- подписки OPC UA --
+
+/// Как часто без изменений и без запросов проверять связь (одно чтение `ServerStatus.State`), если цикл опроса короче.
+const HEALTH_CHECK_MIN: Duration = Duration::from_secs(5);
+
+/// Период, с которым сервер читает узел тега (`samplingInterval`): настройка «период» из `channel.tag-settings`, иначе `pollingRate`
+/// тега, иначе цикл контроллера.
+fn sampling_ms(tag: &Tag, cycle_ms: u64) -> f64 {
+    let ms = tag
+        .tuning
+        .poll_period()
+        .map(|d| d.as_millis() as u64)
+        .or_else(|| (tag.polling_rate_ms > 0).then_some(tag.polling_rate_ms))
+        .unwrap_or(cycle_ms);
+    ms.max(1) as f64
+}
+
+/// Создать подписки на все узлы. `None` — не удалось (причина в журнале и событии `CONFIG`): сеанс идёт опросом.
+async fn start_subscription(
+    app: &App,
+    handle: &ControllerHandle,
+    conn: &OpcConnection,
+    tags: &[Arc<Tag>],
+    nodes: &[ReadValueId],
+) -> Option<Subscription> {
+    let name = &handle.ctrl.name;
+    let cycle_ms = handle.ctrl.cycle_period_ms();
+    let sampling: Vec<f64> = tags.iter().map(|t| sampling_ms(t, cycle_ms)).collect();
+    match conn.subscribe(nodes, &sampling, cycle_ms as f64).await {
+        Ok(sub) => {
+            info!(
+                "📬 {name}: подписки OPC UA — {} узлов в {} подписках, публикация раз в {} мс{}",
+                nodes.len() - sub.refused.len(),
+                sub.subscriptions,
+                sub.publishing_ms,
+                if sub.refused.is_empty() {
+                    String::new()
+                } else {
+                    format!(", сервер отказал для {} узлов (теги BAD)", sub.refused.len())
+                }
+            );
+            Some(sub)
+        }
+        Err(e) => {
+            warn!("⚠ {name}: подписки не созданы ({e:#}) — опрашиваю запросами Read");
+            app.events.emit(
+                Event::new(
+                    "CONFIG",
+                    "Gateway",
+                    "WARNING",
+                    format!("{name}: подписки OPC UA не созданы — опрос запросами Read"),
+                )
+                .controller(handle.ctrl.id.get())
+                .details(json!({"acquisition": "subscription", "fallback": "poll", "error": format!("{e:#}")})),
+            );
+            None
+        }
+    }
+}
+
+/// Показание тега из последнего значения узла.
+fn reading_of(tag: &Arc<Tag>, dv: &DataValue) -> Reading {
+    let (value, quality, timestamp) = opcua::reading(dv);
+    Reading { tag: tag.clone(), value, quality, timestamp }
+}
+
+/// Прочитать все узлы запросом и положить в кэш (начальные значения и опрос после записи); `true` — хотя бы одно значение хорошее.
+async fn refresh_cache(
+    app: &App,
+    handle: &ControllerHandle,
+    conn: &OpcConnection,
+    processor: &mut Processor,
+    tags: &[Arc<Tag>],
+    nodes: &[ReadValueId],
+    cache: &mut [Option<DataValue>],
+) -> bool {
+    match conn.read(nodes).await {
+        Ok(values) => {
+            let readings: Vec<Reading> = tags.iter().zip(values.iter()).map(|(tag, dv)| reading_of(tag, dv)).collect();
+            for (slot, dv) in cache.iter_mut().zip(values) {
+                *slot = Some(dv);
+            }
+            let good = readings.iter().any(|r| r.quality == Quality::Good);
+            processor.process(&readings);
+            if good || readings.is_empty() {
+                app.mark_up(handle);
+            }
+            good
+        }
+        Err(e) => {
+            debug!("{}: чтение всех узлов не удалось: {e:#}", handle.ctrl.name);
+            false
+        }
+    }
+}
+
+/// Цикл подписок до обрыва или остановки. Изменения узлов идут в обработку сразу, как пришли; раз в цикл контроллера в неё
+/// же подаются последние известные значения «созревших» тегов — как при опросе (полная переотправка, качество), но без чтения
+/// из сети. Связь: приходят ли уведомления; если их нет дольше [`HEALTH_CHECK_MIN`] (или трёх циклов) — одно чтение состояния сервера.
+#[allow(clippy::too_many_arguments)] // состояние цикла опроса передаётся как есть, как у read_opcua_cycle
+async fn run_subscription(
+    app: &App,
+    handle: &ControllerHandle,
+    conn: &OpcConnection,
+    processor: &mut Processor,
+    schedule: &mut PollSchedule,
+    tags: &[Arc<Tag>],
+    nodes: &[ReadValueId],
+    mut sub: Subscription,
+    cancel: &CancellationToken,
+) {
+    let gw = &app.settings.gateway;
+    let cycle = Duration::from_millis(handle.ctrl.cycle_period_ms());
+    let health_after = (cycle * 3).max(HEALTH_CHECK_MIN);
+    let mut cache: Vec<Option<DataValue>> = vec![None; tags.len()];
+    for &(index, status) in &sub.refused {
+        cache[index] = Some(DataValue { status: Some(status), ..Default::default() });
+    }
+    // Значения узлов, которые подписка пришлёт сама, — но сразу после подписки уже есть что показать, и связь проверена.
+    refresh_cache(app, handle, conn, processor, tags, nodes, &mut cache).await;
+    let mut last_activity = Instant::now();
+    let mut tick = ticker(handle);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            event = sub.events.recv() => {
+                let Some(event) = event else { return };
+                let mut readings = Vec::new();
+                let mut closed = None;
+                let mut handle_event = |event: SubscriptionEvent| match event {
+                    SubscriptionEvent::Data { index, value } => {
+                        if let Some(tag) = tags.get(index) {
+                            readings.push(reading_of(tag, &value));
+                            cache[index] = Some(value);
+                        }
+                    }
+                    SubscriptionEvent::Closed(status) => closed = Some(status),
+                };
+                handle_event(event);
+                // Всё, что накопилось, — одной пачкой в обработку.
+                while let Ok(more) = sub.events.try_recv() {
+                    handle_event(more);
+                }
+                if !readings.is_empty() {
+                    last_activity = Instant::now();
+                    let good = readings.iter().any(|r| r.quality == Quality::Good);
+                    processor.process(&readings);
+                    if good {
+                        app.mark_up(handle);
+                    }
+                }
+                if let Some(status) = closed {
+                    warn!("{}: сервер закрыл подписку ({status}) — пересоздаю сессию", handle.ctrl.name);
+                    processor.process(&all_bad(tags));
+                    app.mark_down(handle, &format!("подписка закрыта сервером ({status})"));
+                    return;
+                }
+            }
+            _ = tick.tick() => {
+                if !conn.is_alive() {
+                    processor.process(&all_bad(tags));
+                    app.mark_down(handle, "сессия OPC UA закрыта");
+                    return;
+                }
+                let now = Instant::now();
+                let due: Vec<Reading> = tags
+                    .iter()
+                    .zip(cache.iter())
+                    .filter_map(|(tag, dv)| dv.as_ref().map(|dv| (tag, dv)))
+                    .filter(|(tag, _)| schedule.take_due(tag, now))
+                    .map(|(tag, dv)| reading_of(tag, dv))
+                    .collect();
+                if !due.is_empty() {
+                    processor.process(&due);
+                }
+                if cache.iter().all(|dv| dv.as_ref().is_some_and(|dv| !dv.status().is_good())) && !cache.is_empty() {
+                    // Сервер жив, а данных за ним нет — тот же вывод, что при опросе: обрыв.
+                    app.mark_down(handle, "все узлы вернули BAD");
+                } else if last_activity.elapsed() >= health_after {
+                    match conn.read(&[ReadValueId::from(opcua::NodeId::from(opcua::VariableId::Server_ServerStatus_State))]).await {
+                        Ok(_) => {
+                            last_activity = Instant::now();
+                            app.mark_up(handle);
+                        }
+                        Err(e) => {
+                            processor.process(&all_bad(tags));
+                            app.mark_down(handle, &format!("OPC UA reads failing: {e:#}"));
+                            if handle.is_stale(gw.stale_after) {
+                                warn!(
+                                    "🔄 {}: нет связи > {} c — пересоздаю сессию",
+                                    handle.ctrl.name,
+                                    gw.stale_after.as_secs()
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            _ = handle.poll_requested(gw.poll_after_write) => {
+                // После записи: свежие значения всех узлов запросом (уведомления придут не раньше интервала публикации).
+                refresh_cache(app, handle, conn, processor, tags, nodes, &mut cache).await;
+                last_activity = Instant::now();
+            }
         }
     }
 }

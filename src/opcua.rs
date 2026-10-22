@@ -18,13 +18,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::Utc;
-use opcua::client::{Client, ClientBuilder, IdentityToken, Session};
+use opcua::client::{Client, ClientBuilder, IdentityToken, OnSubscriptionNotification, Session};
 use opcua::crypto::SecurityPolicy;
 use opcua::types::{
-    AttributeId, DataValue, EndpointDescription, Identifier, MessageSecurityMode, NumericRange, StatusCode,
-    TimestampsToReturn, UAString, UserTokenPolicy, VariableId, Variant, WriteValue,
+    AttributeId, EndpointDescription, ExtensionObject, Identifier, MessageSecurityMode, MonitoredItemCreateRequest,
+    MonitoringMode, MonitoringParameters, NumericRange, StatusChangeNotification, StatusCode, TimestampsToReturn,
+    UAString, UserTokenPolicy, Variant, WriteValue,
 };
-pub use opcua::types::{NodeId, ReadValueId};
+pub use opcua::types::{DataValue, NodeId, ReadValueId, VariableId};
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
@@ -38,6 +39,56 @@ use crate::opcua_cert::{self, CertSettings};
 
 /// Узлов в одном запросе чтения, если сервер не требует меньше.
 pub const READ_CHUNK: usize = 500;
+
+/// Узлов в одной подписке, если сервер не требует меньше.
+const MONITORED_ITEMS_PER_SUBSCRIPTION: usize = 5000;
+/// Подписка живёт 60 интервалов публикации без Publish-запроса, keep-alive — раз в 10 интервалов.
+const SUBSCRIPTION_LIFETIME_COUNT: u32 = 60;
+const SUBSCRIPTION_KEEP_ALIVE_COUNT: u32 = 10;
+/// Очередь элемента на сервере: значения между двумя публикациями не теряются (старейшие вытесняются при переполнении).
+const MONITORED_ITEM_QUEUE: u32 = 10;
+
+/// Что присылает подписка: новое значение узла (номер узла в списке `subscribe`) или смену состояния подписки.
+#[derive(Debug)]
+pub enum SubscriptionEvent {
+    /// Значение узла `index`.
+    Data {
+        /// Номер узла в списке, переданном в `subscribe`.
+        index: usize,
+        /// Значение с качеством и временем источника.
+        value: DataValue,
+    },
+    /// Сервер закрыл подписку (код — причина): данные больше не придут, сессию надо пересоздать.
+    Closed(StatusCode),
+}
+
+/// Созданные подписки.
+pub struct Subscription {
+    /// Изменения значений и закрытие подписки.
+    pub events: tokio::sync::mpsc::UnboundedReceiver<SubscriptionEvent>,
+    /// Узлы (номер в списке и код), которые сервер отказался взять в подписку.
+    pub refused: Vec<(usize, StatusCode)>,
+    /// Сколько подписок создано.
+    pub subscriptions: usize,
+    /// Интервал публикации, мс.
+    pub publishing_ms: f64,
+}
+
+/// Передача уведомлений подписки в канал цикла опроса.
+struct Forward {
+    tx: tokio::sync::mpsc::UnboundedSender<SubscriptionEvent>,
+}
+
+impl OnSubscriptionNotification for Forward {
+    fn on_data_value(&mut self, value: DataValue, item: &opcua::client::MonitoredItem) {
+        let index = item.client_handle().saturating_sub(1) as usize;
+        let _ = self.tx.send(SubscriptionEvent::Data { index, value });
+    }
+
+    fn on_subscription_status_change(&mut self, notification: StatusChangeNotification) {
+        let _ = self.tx.send(SubscriptionEvent::Closed(notification.status));
+    }
+}
 
 /// Живое соединение с OPC UA-сервером: сессия и задача её цикла событий. Закрывается [`OpcConnection::close`].
 pub struct OpcConnection {
@@ -54,6 +105,9 @@ pub struct OpcConnection {
     namespaces: Vec<String>,
     /// Узлы тегов, разобранные в [`OpcConnection::prepare`]: адрес из конфигурации → узел и его тип.
     nodes: HashMap<String, NodeInfo>,
+    /// Пределы подписок сервера (`MaxMonitoredItemsPerCall`, `MaxMonitoredItemsPerSubscription`); `None`/0 — не названы.
+    max_items_per_call: Option<u32>,
+    max_items_per_subscription: Option<u32>,
 }
 
 /// Сколько ждать TCP-подключения при выборе адреса из нескольких.
@@ -245,6 +299,8 @@ impl OpcConnection {
             chunk: AtomicUsize::new(READ_CHUNK),
             namespaces: Vec::new(),
             nodes: HashMap::new(),
+            max_items_per_call: None,
+            max_items_per_subscription: None,
         })
     }
 
@@ -302,9 +358,13 @@ impl OpcConnection {
     /// [`READ_CHUNK`], запись по `dataType` тега.
     pub async fn prepare(&mut self, tags: &[Arc<Tag>]) -> Result<PreparedNodes> {
         let mut report = NodeReport::default();
-        let server =
-            [VariableId::Server_NamespaceArray, VariableId::Server_ServerCapabilities_OperationLimits_MaxNodesPerRead]
-                .map(|id| ReadValueId::from(NodeId::from(id)));
+        let server = [
+            VariableId::Server_NamespaceArray,
+            VariableId::Server_ServerCapabilities_OperationLimits_MaxNodesPerRead,
+            VariableId::Server_ServerCapabilities_OperationLimits_MaxMonitoredItemsPerCall,
+            VariableId::Server_ServerCapabilities_MaxMonitoredItemsPerSubscription,
+        ]
+        .map(|id| ReadValueId::from(NodeId::from(id)));
         match self.read(&server).await {
             Ok(values) => {
                 self.namespaces = string_array(values[0].value.as_ref());
@@ -312,6 +372,12 @@ impl OpcConnection {
                     Some(Variant::UInt32(n)) if values[1].status().is_good() => Some(n),
                     _ => None,
                 };
+                let limit_of = |dv: &DataValue| match dv.value {
+                    Some(Variant::UInt32(n)) if dv.status().is_good() && n > 0 => Some(n),
+                    _ => None,
+                };
+                self.max_items_per_call = limit_of(&values[2]);
+                self.max_items_per_subscription = limit_of(&values[3]);
                 // 0 — сервер предела не ставит.
                 if let Some(limit) = report.max_nodes_per_read.filter(|&n| n > 0) {
                     self.chunk.fetch_min(limit as usize, Ordering::Relaxed);
@@ -360,6 +426,105 @@ impl OpcConnection {
         report.read_chunk = self.read_chunk();
         prepared.report = report;
         Ok(prepared)
+    }
+
+    /// Подписать узлы: `sampling_ms[i]` — период опроса узла сервером. Узлы делятся по подпискам и запросам в пределах
+    /// сервера (`MaxMonitoredItemsPerSubscription`, `MaxMonitoredItemsPerCall`); client handle узла — его номер в `nodes` плюс 1.
+    /// Изменения (и первое значение каждого узла) приходят в [`Subscription::events`]. Ошибка — подписка не создана
+    /// (шлюз тогда опрашивает контроллер запросами Read); узлы, которые сервер отказался взять, — в [`Subscription::refused`].
+    pub async fn subscribe(
+        &self,
+        nodes: &[ReadValueId],
+        sampling_ms: &[f64],
+        publishing_ms: f64,
+    ) -> Result<Subscription> {
+        ensure!(nodes.len() == sampling_ms.len(), "периодов опроса {} на {} узлов", sampling_ms.len(), nodes.len());
+        let (tx, events) = tokio::sync::mpsc::unbounded_channel();
+        // Размеры подписки и запроса берутся из названных сервером пределов, а если сервер их не назвал (или назвал больше, чем
+        // принимает) — по отказу `BadTooManyMonitoredItems`: запрос вдвое меньше, а полная подписка закрывается и открывается следующая.
+        let mut per_subscription =
+            self.max_items_per_subscription.map_or(usize::MAX, |n| n as usize).min(MONITORED_ITEMS_PER_SUBSCRIPTION);
+        let mut per_call =
+            self.max_items_per_call.map_or(READ_CHUNK, |n| n as usize).min(READ_CHUNK).min(per_subscription);
+        let mut refused = Vec::new();
+        let mut subscriptions = 0usize;
+        let mut current: Option<(u32, usize)> = None; // (подписка, узлов в ней)
+        let mut next = 0usize;
+        while next < nodes.len() {
+            let (id, in_subscription) = match current {
+                Some((id, n)) if n < per_subscription => (id, n),
+                _ => {
+                    let id = timeout(
+                        self.op_timeout,
+                        self.session.create_subscription(
+                            Duration::from_millis(publishing_ms.max(1.0) as u64),
+                            SUBSCRIPTION_LIFETIME_COUNT,
+                            SUBSCRIPTION_KEEP_ALIVE_COUNT,
+                            0,
+                            0,
+                            true,
+                            Forward { tx: tx.clone() },
+                        ),
+                    )
+                    .await
+                    .context("таймаут создания подписки")?
+                    .map_err(|e| anyhow!("подписка не создана: {e}"))?;
+                    subscriptions += 1;
+                    current = Some((id, 0));
+                    (id, 0)
+                }
+            };
+            let count = per_call.min(per_subscription - in_subscription).min(nodes.len() - next);
+            let items: Vec<MonitoredItemCreateRequest> = (next..next + count)
+                .map(|i| MonitoredItemCreateRequest {
+                    item_to_monitor: nodes[i].clone(),
+                    monitoring_mode: MonitoringMode::Reporting,
+                    requested_parameters: MonitoringParameters {
+                        client_handle: (i + 1) as u32,
+                        sampling_interval: sampling_ms[i],
+                        filter: ExtensionObject::null(),
+                        queue_size: MONITORED_ITEM_QUEUE,
+                        discard_oldest: true,
+                    },
+                })
+                .collect();
+            let created =
+                timeout(self.op_timeout, self.session.create_monitored_items(id, TimestampsToReturn::Both, items))
+                    .await
+                    .context("таймаут создания элементов подписки")?;
+            match created {
+                Ok(created) => {
+                    ensure!(created.len() == count, "сервер вернул {} результатов на {count} узлов", created.len());
+                    for (k, item) in created.iter().enumerate() {
+                        if item.result.status_code.is_bad() {
+                            refused.push((next + k, item.result.status_code));
+                        }
+                    }
+                    next += count;
+                    current = Some((id, in_subscription + count));
+                }
+                Err(e) if same_status(e.status(), StatusCode::BadTooManyMonitoredItems) => {
+                    if in_subscription > 0 {
+                        // В этой подписке места нет: больше в неё не кладём.
+                        per_subscription = in_subscription;
+                        warn!(
+                            "OPC UA {}: сервер принимает в подписку {in_subscription} узлов — открываю следующую",
+                            self.url
+                        );
+                    } else if count > 1 {
+                        per_call = count / 2;
+                        per_subscription = per_subscription.max(per_call);
+                    } else {
+                        bail!("сервер не принимает узлы в подписку: {e}");
+                    }
+                }
+                Err(e) if same_status(e.status(), StatusCode::BadTooManyOperations) && count > 1 => {
+                    per_call = count / 2
+                }
+                Err(e) => bail!("элементы подписки не созданы: {e}"),
+            }
+        }
+        Ok(Subscription { events, refused, subscriptions, publishing_ms })
     }
 
     /// Ошибка чтения означает обрыв: таймаут или закрытая сессия (а не отказ живого сервера).

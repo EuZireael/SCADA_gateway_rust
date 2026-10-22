@@ -542,6 +542,7 @@ mod processor_tests {
         let (events, events_rx) = events::channel(metrics.clone());
         let (history, history_rx) = events::telemetry_channel(metrics.clone());
         let mut controller = Controller::from_config(&ServerConfig {
+            acquisition: None,
             id: None,
             name: "C".into(),
             endpoint: "opc.tcp://h:4840".into(),

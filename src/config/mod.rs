@@ -573,6 +573,32 @@ mod tests {
     }
 
     #[test]
+    fn acquisition_is_poll_by_default_and_subscription_only_for_opcua() {
+        let yaml = |extra: &str, endpoint: &str| {
+            format!(
+                "opcua:\n  servers:\n    - {{name: C, endpoint: \"{endpoint}\", enabled: true, {extra} tags: []}}\n"
+            )
+        };
+        let by_default = parse_controllers(&yaml("", "opc.tcp://h:4840")).unwrap();
+        assert_eq!(
+            crate::model::Controller::from_config(&by_default[0]).unwrap().acquisition,
+            crate::model::Acquisition::Poll
+        );
+        let sub = parse_controllers(&yaml("acquisition: Subscription,", "opc.tcp://h:4840")).unwrap();
+        assert_eq!(
+            crate::model::Controller::from_config(&sub[0]).unwrap().acquisition,
+            crate::model::Acquisition::Subscription
+        );
+        assert!(parse_controllers(&yaml("acquisition: poll,", "modbus://h:502")).is_ok(), "poll допустим везде");
+        for endpoint in ["modbus://h:502", "pac://h:10000"] {
+            let err = parse_controllers(&yaml("acquisition: subscription,", endpoint)).unwrap_err();
+            assert!(format!("{err:#}").contains("только для OPC UA"), "{err:#}");
+        }
+        let err = parse_controllers(&yaml("acquisition: push,", "opc.tcp://h:4840")).unwrap_err();
+        assert!(format!("{err:#}").contains("poll и subscription"), "{err:#}");
+    }
+
+    #[test]
     fn opcua_security_and_credentials_are_parsed_and_validated() {
         let yaml = |extra: &str, endpoint: &str| {
             format!(
