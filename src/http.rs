@@ -81,13 +81,19 @@ mod tests {
 async fn health(State(app): State<Arc<App>>) -> Json<Value> {
     let db = match &app.db {
         Some(pool) => {
-            if db::ping(pool).await {
-                "UP"
-            } else {
-                "DOWN"
+            let ready = app.db_ready.load(std::sync::atomic::Ordering::Relaxed);
+            let reason = match (db::ping(pool).await, ready) {
+                (true, true) => None,
+                (true, false) => Some("схема и теги ещё не синхронизированы, повтор в фоне"),
+                (false, true) => Some("нет соединения с БД"),
+                (false, false) => Some("БД недоступна с запуска шлюза: схема и теги не синхронизированы"),
+            };
+            match reason {
+                None => json!({"status": "UP"}),
+                Some(reason) => json!({"status": "DOWN", "details": {"reason": reason}}),
             }
         }
-        None => "DISABLED",
+        None => json!({"status": "DISABLED"}),
     };
     let controllers: serde_json::Map<String, Value> = app
         .controllers
@@ -98,7 +104,7 @@ async fn health(State(app): State<Arc<App>>) -> Json<Value> {
         Some(k) => json!({"status": if k.delivery().healthy() { "UP" } else { "DOWN" }}),
         None => json!({"status": "DISABLED"}),
     };
-    Json(json!({"status": "UP", "components": {"db": {"status": db}, "kafka": kafka, "controllers": controllers}}))
+    Json(json!({"status": "UP", "components": {"db": db, "kafka": kafka, "controllers": controllers}}))
 }
 
 async fn prometheus(State(app): State<Arc<App>>) -> Response {
@@ -114,7 +120,7 @@ async fn status(State(app): State<Arc<App>>) -> Json<Value> {
         .controllers
         .iter()
         .map(|c| {
-            let mut status = json!({"id": c.ctrl.id, "name": c.ctrl.name, "endpoint": c.ctrl.endpoint,
+            let mut status = json!({"id": c.ctrl.id.get(), "name": c.ctrl.name, "endpoint": c.ctrl.endpoint,
                         "protocol": format!("{:?}", c.ctrl.kind), "connected": c.is_connected(),
                         "tags": c.ctrl.tags.len()});
             // Проверка узлов OPC UA при последнем подключении: неизвестные узлы, типы, предел запроса.

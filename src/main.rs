@@ -170,6 +170,9 @@ async fn run() -> Result<()> {
         tasks.supervise("ha-events", move || ha::record_events(leadership.clone(), events.clone(), cancel.clone()));
     }
 
+    if let Some(pending) = station.pending_db {
+        startup::spawn_db_sync(&app, pending, &mut tasks);
+    }
     startup::spawn_pollers(&app, &mut tasks);
     startup::spawn_commands(&app, &leadership, &mut tasks);
     startup::spawn_tag_settings(&app, &mut tasks);

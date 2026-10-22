@@ -27,7 +27,7 @@ pub async fn run(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancellat
     info!("📡 {} ({:?}) {} — тегов {}, период {} мс", c.name, c.kind, c.endpoint, c.tags.len(), c.cycle_period_ms());
     app.events.emit(
         Event::new("CONNECTION", "Gateway", "INFO", format!("Connection to {}: CONNECTING", c.name))
-            .controller(c.id)
+            .controller(c.id.get())
             .details(json!({"endpoint": c.endpoint, "status": "CONNECTING"})),
     );
     match c.kind {
@@ -127,7 +127,7 @@ fn report_nodes(app: &App, handle: &ControllerHandle, report: &NodeReport) {
         );
         app.events.emit(
             Event::new("CONFIG", "Gateway", "WARNING", format!("{name}: узлы OPC UA — {counts}"))
-                .controller(handle.ctrl.id)
+                .controller(handle.ctrl.id.get())
                 .details(report.summary(REPORT_DETAIL_LINES)),
         );
     }
@@ -173,7 +173,7 @@ fn on_connect_failed(
                 "WARNING",
                 format!("Connection to {}: CONNECT_FAILED", handle.ctrl.name),
             )
-            .controller(handle.ctrl.id)
+            .controller(handle.ctrl.id.get())
             .details(json!({"status": "CONNECT_FAILED", "details": format!("попыток подряд: {fails} — {e:#}")})),
         );
     }

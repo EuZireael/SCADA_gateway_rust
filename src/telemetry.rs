@@ -140,14 +140,14 @@ impl Processor {
             }
 
             // 5. Локальная история — только значимые точки.
-            if app.telemetry.is_some() && r.tag.id > 0 {
+            if app.telemetry.is_some() && r.tag.id.get() > 0 {
                 let mut params = FilterParams::history(&gw.history, &r.tag.history);
                 if let Some(deadband) = r.tag.tuning.deadband() {
                     params.deadband = deadband; // настройка из channel.tag-settings важнее YAML
                 }
                 if filter::decide_phased(&params, &mut state.history, value, quality, now, state.phase) {
                     history_rows.push(TelemetryRow {
-                        tag_id: r.tag.id,
+                        tag_id: r.tag.id.get(),
                         time: r.timestamp.0,
                         quality: quality.as_str(),
                         value: value.cloned(),
@@ -214,7 +214,7 @@ impl Processor {
                     to_good.len()
                 ),
             )
-            .controller(self.controller.ctrl.id)
+            .controller(self.controller.ctrl.id.get())
             .details(json!({"toBad": to_bad.len(), "toGood": to_good.len(), "tags": sample})),
         );
     }
@@ -260,8 +260,8 @@ impl AlarmEvaluator {
                     }
                     app.events.emit(
                         Event::new("ALARM", "Gateway", severity, message.clone())
-                            .tag(tag.id)
-                            .controller(ctrl.ctrl.id)
+                            .tag(tag.id.get())
+                            .controller(ctrl.ctrl.id.get())
                             .details(json!({"threshold": threshold, "currentValue": value, "tagName": tag.name, "unit": tag.unit})),
                     );
                     publish_alarm(app, ctrl, tag, &alarm_id, severity, &message, threshold, value, false);
@@ -303,7 +303,8 @@ impl AlarmEvaluator {
                 if self.active.get(&tag.name).is_some_and(|a| a.condition == condition) {
                     return None; // то же нарушение — молчим (анти-флуд)
                 }
-                let alarm_id = format!("ALARM_{}_{}_{}", tag.id, condition, chrono::Utc::now().timestamp_millis());
+                let alarm_id =
+                    format!("ALARM_{}_{}_{}", tag.id.get(), condition, chrono::Utc::now().timestamp_millis());
                 let previous = self.active.insert(
                     tag.name.clone(),
                     ActiveAlarm { condition, alarm_id: alarm_id.clone(), severity, threshold },
@@ -335,8 +336,8 @@ fn publish_clear(app: &App, ctrl: &ControllerHandle, tag: &Tag, prev: &ActiveAla
     info!("✅ Аларм снят: {} ({value:.2})", tag.name);
     app.events.emit(
         Event::new("ALARM_CLEARED", "Gateway", "INFO", format!("Alarm cleared for {} ({value:.2})", tag.name))
-            .tag(tag.id)
-            .controller(ctrl.ctrl.id)
+            .tag(tag.id.get())
+            .controller(ctrl.ctrl.id.get())
             .details(json!({"tagName": tag.name, "alarmId": prev.alarm_id})),
     );
     publish_alarm(
@@ -371,7 +372,7 @@ fn publish_alarm(
             kind: "ALARM",
             alarm_id: alarm_id.to_string(),
             // tagId на проводе — id канала общей базы (как у Java-шлюза), иначе PK шлюза.
-            tag_id: tag.channel_id.or((tag.id > 0).then_some(tag.id)),
+            tag_id: tag.channel_id.or(Some(tag.id.get()).filter(|id| *id > 0)),
             tag_name: tag.name.clone(),
             severity: severity.to_string(),
             message: message.to_string(),
@@ -380,7 +381,7 @@ fn publish_alarm(
             timestamp: Timestamp::now(),
             acknowledged: false,
             cleared,
-            controller_id: (ctrl.ctrl.id > 0).then_some(ctrl.ctrl.id),
+            controller_id: Some(ctrl.ctrl.id.get()).filter(|id| *id > 0),
             controller_name: Some(ctrl.ctrl.name.clone()),
         });
     }
@@ -553,7 +554,7 @@ mod processor_tests {
         .unwrap();
         // Как после синхронизации с БД: у тега есть id (история пишется только тегам с id).
         for (n, t) in controller.tags.iter_mut().enumerate() {
-            Arc::make_mut(t).id = n as i64 + 1;
+            t.id.set(n as i64 + 1);
         }
         let names: Vec<String> = controller.tags.iter().map(|t| t.name.clone()).collect();
         let scripts = match scripts_dir {
@@ -845,6 +846,26 @@ mod processor_tests {
             [f(11.9)],
             "B: снова зона 1.0 из YAML — от записанного 10.8 значение 11.0 мало, 11.9 значимо"
         );
+    }
+
+    #[test]
+    fn ids_assigned_after_start_reach_history_and_commands() {
+        // Как при запуске без БД: номеров нет — история не пишется, команда по tagId тег не находит (по имени — находит).
+        let mut r = rig(|_| {}, &[("A", "FLOAT")], None, false);
+        let tag = r.app.controllers[0].ctrl.tags[0].clone();
+        tag.id.set(0);
+        r.app.reindex_ids();
+        r.cycle(0, &[(0, f(1.0), Good)]);
+        assert!(r.history_rx.try_recv().is_err(), "без номера тега история не пишется");
+        assert!(r.app.tag_by_id(1).is_none());
+        assert!(r.app.tag_by_name("A").is_some());
+        // БД подключилась: синхронизация записала номер в ту же ячейку, индекс перестроен.
+        tag.id.set(42);
+        r.app.reindex_ids();
+        assert_eq!(r.app.tag_by_id(42).map(|t| t.tag.name.clone()).as_deref(), Some("A"));
+        r.cycle(2, &[(0, f(2.0), Good)]);
+        let rows: Vec<TelemetryRow> = std::iter::from_fn(|| r.history_rx.try_recv().ok()).flatten().collect();
+        assert_eq!(rows.iter().map(|x| x.tag_id).collect::<Vec<_>>(), [42]);
     }
 
     #[test]
