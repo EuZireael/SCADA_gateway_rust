@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use argon2::Argon2;
-use argon2::password_hash::rand_core::OsRng;
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::phc::PasswordHash;
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use async_trait::async_trait;
 use opcua::crypto::{CertificateStore, SecurityPolicy, X509Data};
 use opcua::server::ServerEndpoint;
@@ -49,11 +49,8 @@ pub struct User {
 
 /// Хеш argon2 (PHC-строка) пароля — для файла пользователей (`ptusa-opcua hash-password`).
 pub fn hash_password(password: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|h| h.to_string())
-        .map_err(|e| anyhow!("хеш пароля: {e}"))
+    // Соль — случайная, из системного генератора (getrandom).
+    Argon2::default().hash_password(password.as_bytes()).map(|h| h.to_string()).map_err(|e| anyhow!("хеш пароля: {e}"))
 }
 
 /// Файл пользователей: строка `имя  хеш  роль`; пустые строки и `#…` пропускаются. Хеш должен быть PHC-строкой argon2.
@@ -364,9 +361,7 @@ impl AuthManager for Gate {
             Some(u) => (u.hash.as_str(), true),
             None => (dummy_hash(), false),
         };
-        let ok = PasswordHash::new(hash)
-            .map(|parsed| Argon2::default().verify_password(password.get().as_bytes(), &parsed).is_ok())
-            .unwrap_or(false);
+        let ok = Argon2::default().verify_password(password.get().as_bytes(), hash).is_ok();
         match (user, ok && known) {
             (Some(u), true) => {
                 info!(
@@ -422,9 +417,20 @@ mod tests {
             users.iter().map(|u| (u.name.as_str(), u.role)).collect::<Vec<_>>(),
             [("anna", Role::Write), ("boris", Role::Read)]
         );
-        let parsed = PasswordHash::new(&users[0].hash).unwrap();
-        assert!(Argon2::default().verify_password(b"s3cret", &parsed).is_ok());
-        assert!(Argon2::default().verify_password(b"other", &parsed).is_err());
+        assert!(Argon2::default().verify_password(b"s3cret", users[0].hash.as_str()).is_ok());
+        assert!(Argon2::default().verify_password(b"other", users[0].hash.as_str()).is_err());
+    }
+
+    /// Хеш, выпущенный `ptusa-opcua hash-password` на argon2 0.5 (до обновления библиотеки): файлы пользователей на станциях
+    /// остаются рабочими. Параметры по умолчанию — те же (Argon2id v19, m=19456, t=2, p=1), новые хеши того же вида.
+    #[test]
+    fn hashes_from_argon2_0_5_are_accepted() {
+        const OLD: &str =
+            "$argon2id$v=19$m=19456,t=2,p=1$0TF+g3g5854cYRgmYDD1Ag$NBJth5LX5L54WSgVxj8Dx2c5A3V+bdM7BuYNOMir50k";
+        let users = parse_users(&format!("anna {OLD} write")).unwrap();
+        assert!(Argon2::default().verify_password(b"argon2-0.5-pass", users[0].hash.as_str()).is_ok());
+        assert!(Argon2::default().verify_password(b"other", users[0].hash.as_str()).is_err());
+        assert!(hash_password("x").unwrap().starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
     }
 
     #[test]
