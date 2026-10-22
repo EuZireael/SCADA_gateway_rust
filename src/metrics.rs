@@ -28,6 +28,8 @@ pub struct Metrics {
     /// Сколько тегов сейчас с настройками из топика `channel.tag-settings` (период опроса, зона истории).
     pub tag_settings_tags: IntGauge,
     ha_active: IntGaugeVec,
+    /// Экземпляров другой станции в группе выборов резервирования (должно быть 0).
+    pub ha_foreign_members: IntGauge,
     /// Команды по исходу (`status`).
     pub commands: IntCounterVec,
     /// Контроллеров на связи сейчас.
@@ -131,6 +133,10 @@ impl Metrics {
             scripts_bound_tags: gauge("scada_scripts_bound_tags", "Каналов с пользовательскими скриптами"),
             tag_settings_tags: gauge("scada_tag_settings_tags", "Тегов с настройками из топика channel.tag-settings"),
             ha_active,
+            ha_foreign_members: gauge(
+                "scada_ha_foreign_members",
+                "Экземпляров другой станции в группе выборов резервирования (должно быть 0)",
+            ),
             commands,
             controllers_connected: gauge("scada_controllers_connected", "Контроллеров на связи"),
             controllers_total: gauge("scada_controllers_total", "Всего сконфигурировано контроллеров"),

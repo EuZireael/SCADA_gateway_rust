@@ -53,6 +53,9 @@ pub struct KafkaSettings {
     pub tag_settings_topic: String,
     /// Применять ли настройки тегов из топика (`GATEWAY_TAG_SETTINGS_ENABLED`).
     pub tag_settings_enabled: bool,
+    /// Группа, в которой хранится позиция чтения топика команд (`GATEWAY_COMMANDS_GROUP_ID`). Позиции у Kafka — по топику,
+    /// поэтому станциям со своими топиками команд общая группа не мешает; своя нужна для раздельных ACL.
+    pub commands_group: String,
 }
 
 impl KafkaSettings {
@@ -248,6 +251,8 @@ impl KafkaSettings {
             },
             tag_settings_topic: env_or(&["CHANNEL_TAG_SETTINGS_TOPIC"], "channel.tag-settings"),
             tag_settings_enabled: env_bool(&["GATEWAY_TAG_SETTINGS_ENABLED"], true),
+            // Прежнее имя — по умолчанию: с другим шлюз после обновления начал бы с конца топика и потерял команды окна обновления.
+            commands_group: env_or(&["GATEWAY_COMMANDS_GROUP_ID", "GATEWAY_COMMANDS_GROUPID"], "scada-gateway-group"),
         })
     }
 }
