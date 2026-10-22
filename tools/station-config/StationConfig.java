@@ -47,6 +47,10 @@ import java.util.regex.Pattern;
  *
  * <p>args: cdbx, папка проекта ПЛК, площадка, проект, id контроллера, endpoint, rules.tsv,
  * выходной yaml, протокол (opcua|pac).
+ *
+ * <p>-DpacName=<имя> — имя контроллера (PAC_name прошивки; даёт технолог): в файл пишется identity, и шлюз при каждом
+ * подключении сверяет имя и не работает с чужим контроллером. Без него identity нет, и шлюз предупреждает, что имя не
+ * проверяется.
  */
 public class StationConfig {
 
@@ -139,6 +143,11 @@ public class StationConfig {
                     .append(", writable: ").append(rw).append(limits == null ? "" : limits).append("}\n");
         }
 
+        String pacName = System.getProperty("pacName", "").trim();
+        String identity = pacName.isEmpty()
+                ? "      # identity не задан: имя контроллера не проверяется (-DpacName / PAC_NAME при генерации)\n"
+                : "      identity: {pacName: \"" + q(pacName) + "\""
+                        + (opcua ? ", nodeId: \"ns=2;s=SYSTEM.PAC_NAME\"" : "") + "}\n";
         String yaml = "# ============================================================================\n"
                 + "# Реальная станция " + project + " (" + site + "): один контроллер ptusa, все каналы — "
                 + (opcua ? "OPC UA\n#   (OPC UA-фасад эмулятора ptusa-opcua/: узел ns=2;s=<прибор>.<поле>).\n" : "PAC (driver-master).\n")
@@ -159,6 +168,7 @@ public class StationConfig {
                 + "      name: \"" + q(root) + "\"\n"
                 + "      endpoint: \"" + q(endpoint) + "\"\n"
                 + "      enabled: true\n"
+                + identity
                 + "      tags:\n" + tags;
         Files.writeString(out, yaml);
 

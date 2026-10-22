@@ -549,6 +549,7 @@ mod processor_tests {
             username: None,
             password: None,
             enabled: true,
+            identity: None,
             tags,
         })
         .unwrap();

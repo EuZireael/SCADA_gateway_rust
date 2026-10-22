@@ -13,7 +13,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::app::{App, ControllerHandle};
+use crate::config::IdentityConfig;
 use crate::events::Event;
+use crate::identity::{self, Mismatch};
 use crate::modbus::{self, ModbusClient};
 use crate::model::{ControllerKind, Protocol, Quality, Reading, Tag, Timestamp};
 use crate::opcua::{self, ConnectOptions, NodeReport, OpcConnection, PreparedNodes, ReadValueId};
@@ -190,6 +192,20 @@ fn on_connect_failed(
     }
 }
 
+/// Контроллер назвал не то имя: журнал и событие (не чаще раза в минуту), кадры BAD, связь потеряна. Соединение уже закрыто;
+/// повтор — по обычному расписанию подключения.
+fn on_identity_mismatch(
+    app: &App,
+    handle: &ControllerHandle,
+    processor: &mut Processor,
+    tags: &[Arc<Tag>],
+    mismatch: &Mismatch,
+) {
+    app.identity_mismatch(handle, mismatch);
+    processor.process(&all_bad(tags));
+    app.mark_down(handle, &format!("не тот контроллер: {mismatch}"));
+}
+
 /// Что делать после цикла чтения.
 enum Cycle {
     Continue,
@@ -318,7 +334,17 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
         // могли поменять. Сервер, переставший отвечать при разборе, — та же неудача подключения.
         let connected = match OpcConnection::connect_with(&handle.ctrl.endpoint, gw.opcua_op_timeout, &opts).await {
             Ok(mut c) => match c.prepare(&all_tags).await {
-                Ok(prepared) => Ok((c, prepared)),
+                Ok(prepared) => match &handle.ctrl.identity {
+                    // Имя контроллера — до первой команды: чужой контроллер не читаем и не пишем.
+                    Some(identity) => match c.verify_identity(identity).await {
+                        Ok(()) => Ok((c, prepared)),
+                        Err(e) => {
+                            c.close().await;
+                            Err(e)
+                        }
+                    },
+                    None => Ok((c, prepared)),
+                },
                 Err(e) => {
                     c.close().await;
                     Err(e)
@@ -330,7 +356,11 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
             Ok((c, prepared)) => (Arc::new(c), prepared),
             Err(e) => {
                 fails += 1;
-                on_connect_failed(&app, &handle, &mut processor, &all_tags, fails, &e);
+                if let Some(mismatch) = e.downcast_ref::<Mismatch>() {
+                    on_identity_mismatch(&app, &handle, &mut processor, &all_tags, mismatch);
+                } else {
+                    on_connect_failed(&app, &handle, &mut processor, &all_tags, fails, &e);
+                }
                 if !pause(&cancel, pause_after_failure(&e, fails, gw.reconnect_interval)).await {
                     return;
                 }
@@ -339,6 +369,7 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
         };
         fails = 0;
         handle.touch();
+        app.identity_verified(&handle);
         report_nodes(&app, &handle, &report);
         // Теги, которые не читаются (адрес не разобран), — BAD сразу: иначе монитор показывал бы последнее значение.
         if !unresolved.is_empty() {
@@ -439,8 +470,28 @@ async fn run_pac(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancellat
         // Замок соединения PAC: команды записи идут по тому же соединению и ждут, пока опрос его отпустит.
         let mut guard = handle.pac.lock().await;
         if guard.is_none() {
-            match PacConnection::connect(&host, port, gw.pac_op_timeout).await {
-                Ok(c) => *guard = Some(c),
+            let connected = PacConnection::connect(&host, port, gw.pac_op_timeout).await.and_then(|c| {
+                // Имя PAC — до первой команды: к чужому контроллеру соединение не сохраняется.
+                match &handle.ctrl.identity {
+                    Some(IdentityConfig { pac_name: Some(expected), .. }) => {
+                        identity::check("имя PAC (PAC_name)", expected, c.pac_name().as_deref())?;
+                        Ok(c)
+                    }
+                    _ => Ok(c),
+                }
+            });
+            match connected {
+                Ok(c) => {
+                    app.identity_verified(&handle);
+                    *guard = Some(c)
+                }
+                Err(e) if e.downcast_ref::<Mismatch>().is_some() => {
+                    drop(guard);
+                    if let Some(mismatch) = e.downcast_ref::<Mismatch>() {
+                        on_identity_mismatch(&app, &handle, &mut processor, &tags, mismatch);
+                    }
+                    continue;
+                }
                 Err(e) => {
                     drop(guard);
                     processor.process(&all_bad(&tags));

@@ -11,6 +11,7 @@
 #   tools/station_config.sh <база.cdbx> <папка проекта ПЛК> [площадка] [проект] [выход]
 #     площадка/проект — как при импорте .cdbx в монитор (по умолчанию Барановичи-1 / BN1_MCA1)
 #     выход — по умолчанию config/stations/<проект>.yaml
+#   PAC_NAME=… — имя контроллера (PAC_name); с ним в файл попадает identity (сверка имени шлюзом)
 #   MONITOR_REPO=… — путь к scada-editor-backend (по умолчанию ../scada-editor-backend)
 #   tools/station_config.sh --derive-rules <папка проекта ПЛК>   # пересобрать writable-rules.tsv
 #
@@ -42,7 +43,8 @@ OUT="${5:-config/stations/$PROJECT.yaml}"
 mkdir -p "$(dirname "$OUT")"
 # WRITABLE=all (по умолчанию) — все числовые каналы на запись; WRITABLE=rules — только команды и
 # уставки (writable-rules.tsv), показания датчиков только чтение.
-JAVA_OPTS="-Dwritable=${WRITABLE:-all}"
+# PAC_NAME — имя контроллера (PAC_name прошивки): в файл попадёт identity, шлюз сверяет имя при каждом подключении.
+JAVA_OPTS="-Dwritable=${WRITABLE:-all} -DpacName=${PAC_NAME:-}"
 ID="$(echo "$PROJECT" | tr '[:upper:]_' '[:lower:]-')"
 if [ "$PROTOCOL" = "pac" ]; then
   java $JAVA_OPTS -cp "$BUILD" StationConfig "$CDBX" "$PROJECT_DIR" "$SITE" "$PROJECT" \
