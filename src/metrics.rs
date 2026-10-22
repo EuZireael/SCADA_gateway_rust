@@ -50,6 +50,9 @@ pub struct Metrics {
     pub db_write_errors: IntCounterVec,
     /// Строки, потерянные из-за недоступной БД (`kind`: events, history).
     pub db_rows_lost: IntCounterVec,
+    /// Дней до окончания сертификата OPC UA-клиента (`file` — путь сертификата); у истёкшего — отрицательное.
+    /// Есть только у шлюза с контроллерами OPC UA.
+    pub opcua_cert_expiry_days: IntGaugeVec,
 }
 
 impl Default for Metrics {
@@ -92,6 +95,12 @@ impl Metrics {
             IntGaugeVec::new(Opts::new("scada_ha_active", "1 — экземпляр активный, 0 — резервный"), &["instance"])
                 .expect("метрика");
         registry.register(Box::new(ha_active.clone())).expect("регистрация метрики");
+        let opcua_cert_expiry_days = IntGaugeVec::new(
+            Opts::new("scada_opcua_cert_expiry_days", "Дней до окончания сертификата OPC UA-клиента шлюза"),
+            &["file"],
+        )
+        .expect("метрика");
+        registry.register(Box::new(opcua_cert_expiry_days.clone())).expect("регистрация метрики");
         let process_seconds = Histogram::with_opts(
             HistogramOpts::new("scada_process_seconds", "Обработка цикла опроса одного контроллера")
                 .buckets(vec![0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]),
@@ -142,6 +151,7 @@ impl Metrics {
             task_restarts,
             db_write_errors,
             db_rows_lost,
+            opcua_cert_expiry_days,
             registry,
         }
     }

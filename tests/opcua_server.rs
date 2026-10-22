@@ -19,8 +19,9 @@ use ::opcua::server::node_manager::memory::{SimpleNodeManager, simple_node_manag
 use ::opcua::server::{ServerBuilder, ServerHandle};
 use ::opcua::types::{DataTypeId, DataValue, DateTime, MessageSecurityMode, NodeId, ObjectId, StatusCode, Variant};
 use scada_gateway::config;
-use scada_gateway::model::{Controller, Quality, Tag, TagValue};
-use scada_gateway::opcua::{self, NodeKind, OpcConnection};
+use scada_gateway::model::{Controller, OpcSecurity, Quality, Tag, TagValue};
+use scada_gateway::opcua::{self, ConnectOptions, NodeKind, OpcConnection};
+use scada_gateway::opcua_cert::{self, CertSettings};
 use serde_json::Value;
 
 use common::gateway::Gateway;
@@ -322,4 +323,87 @@ async fn gateway_reads_a_limited_server_and_reports_nodes_in_status() {
     let log = gw.log();
     assert!(log.contains("узлов нет на сервере, теги будут BAD (1): missing"), "{log}");
     assert!(!log.contains("сервер не принимает"), "предел сервера должен быть известен заранее: {log}");
+}
+
+/// Сервер с одной конечной точкой Basic256Sha256/SignAndEncrypt, который сертификатам клиентов не доверяет, пока их
+/// нет в `trusted/` (как настоящий ПЛК); один узел `Float`.
+async fn secure_server(pki: &Path) -> (String, ServerHandle) {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let endpoint =
+        ("/", SecurityPolicy::Basic256Sha256, MessageSecurityMode::SignAndEncrypt, &["ANONYMOUS"] as &[&str]);
+    let (server, handle) = ServerBuilder::new_anonymous("secure test server")
+        .application_uri("urn:scada-gateway:secure-test")
+        .product_uri("urn:scada-gateway:secure-test")
+        .host("127.0.0.1")
+        .port(port)
+        .pki_dir(pki)
+        .create_sample_keypair(true)
+        .trust_client_certs(false)
+        .add_endpoint("secure", endpoint)
+        .with_node_manager(simple_node_manager(
+            NamespaceMetadata { namespace_uri: NS_URI.into(), ..Default::default() },
+            "test",
+        ))
+        .build()
+        .expect("сервер");
+    let manager = handle.node_managers().get_of_type::<SimpleNodeManager>().expect("менеджер узлов");
+    let ns = handle.get_namespace_index(NS_URI).expect("пространство имён");
+    VariableBuilder::new(&NodeId::new(ns, "Float"), "Float", "Float")
+        .data_type(DataTypeId::Float)
+        .value(Variant::Float(1.5))
+        .organized_by(NodeId::from(ObjectId::ObjectsFolder))
+        .insert(&mut *manager.address_space().write());
+    tokio::spawn(server.run());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+        assert!(Instant::now() < deadline, "тестовый сервер не запустился");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    (format!("opc.tcp://127.0.0.1:{port}"), handle)
+}
+
+/// Свой сертификат клиента из настроек (как от УЦ предприятия, со своим URI приложения) идёт в защищённый канал:
+/// сервер, который клиенту не доверяет, отвергает его и кладёт в `rejected/` именно этот сертификат; после переноса в
+/// `trusted/` шлюз подключается и читает.
+#[tokio::test]
+async fn configured_client_certificate_is_presented_on_the_secure_channel() {
+    let root = tempfile::tempdir().unwrap();
+    let (server_pki, issuer, gateway_pki) =
+        (root.path().join("server"), root.path().join("ca"), root.path().join("gw"));
+    let (url, handle) = secure_server(&server_pki).await;
+
+    // «Выданный» сертификат: пара в своих файлах и свой URI приложения.
+    let uri = "urn:plant:scada-gw-1";
+    let issued =
+        opcua_cert::ensure(&CertSettings { application_uri: uri.into(), ..CertSettings::in_dir(&issuer) }).unwrap();
+    let opts = ConnectOptions {
+        security: OpcSecurity::parse(Some("Basic256Sha256"), None, None).unwrap(),
+        cert: CertSettings {
+            own: Some((issued.cert_path.clone(), issued.key_path.clone())),
+            application_uri: uri.into(),
+            ..CertSettings::in_dir(&gateway_pki)
+        },
+        trust_server_certs: true,
+    };
+
+    assert!(OpcConnection::connect_with(&url, OP_TIMEOUT, &opts).await.is_err(), "недоверенный клиент принят");
+    let rejected: Vec<_> = std::fs::read_dir(server_pki.join("rejected")).expect("rejected/").flatten().collect();
+    assert_eq!(rejected.len(), 1, "сервер не отложил сертификат клиента");
+    assert!(
+        rejected[0].file_name().to_string_lossy().contains(&issued.thumbprint),
+        "сервер получил не тот сертификат: {:?}, ждали отпечаток {}",
+        rejected[0].file_name(),
+        issued.thumbprint
+    );
+    assert!(!gateway_pki.join("own/cert.der").exists(), "при своём сертификате самоподписанный не выпускается");
+
+    std::fs::create_dir_all(server_pki.join("trusted")).unwrap();
+    std::fs::rename(rejected[0].path(), server_pki.join("trusted").join(rejected[0].file_name())).unwrap();
+    let conn = OpcConnection::connect_with(&url, OP_TIMEOUT, &opts).await.unwrap_or_else(|e| panic!("{e:#}"));
+    let ns = handle.get_namespace_index(NS_URI).unwrap();
+    let values = conn.read(&[opcua::read_value_id(&format!("ns={ns};s=Float")).unwrap()]).await.unwrap();
+    let (value, quality, _) = opcua::reading(&values[0]);
+    assert_eq!((value, quality), (Some(TagValue::F32(1.5)), Quality::Good));
+    conn.close().await;
+    handle.cancel();
 }

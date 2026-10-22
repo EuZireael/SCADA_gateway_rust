@@ -22,6 +22,7 @@ pub mod metrics;
 pub mod modbus;
 pub mod model;
 pub mod opcua;
+pub mod opcua_cert;
 pub mod pac;
 pub mod poller;
 pub mod sandbox;

@@ -8,7 +8,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail, ensure};
+
+use crate::opcua_cert::{self, CertSettings};
 
 /// Все настройки процесса.
 #[derive(Debug, Clone)]
@@ -116,9 +118,9 @@ pub struct GatewaySettings {
     pub ha: HaSettings,
     /// Таймаут одной операции OPC UA (подключение, пачка чтения, запись).
     pub opcua_op_timeout: Duration,
-    /// Каталог сертификатов OPC UA-клиента (`own/`, `private/`, `trusted/`, `rejected/`): свой
-    /// самоподписанный сертификат создаётся здесь, сертификаты серверов, которым шлюз доверяет, лежат в `trusted/`.
-    pub opcua_pki_dir: PathBuf,
+    /// Сертификат OPC UA-клиента и каталог PKI (`own/`, `private/`, `trusted/`, `rejected/`): свой самоподписанный
+    /// сертификат создаётся там (или задан файлами), сертификаты серверов, которым шлюз доверяет, лежат в `trusted/`.
+    pub opcua_cert: CertSettings,
     /// Доверять любому сертификату сервера (только для стенда: без проверки сервера защищённый канал
     /// не защищает от подмены). По умолчанию — нет: сертификат сервера кладут в `trusted/`.
     pub opcua_trust_server_certs: bool,
@@ -267,9 +269,7 @@ impl GatewaySettings {
             scripts: ScriptSettings::from_env()?,
             ha: HaSettings::from_env(commands_topic)?,
             opcua_op_timeout: env_ms(&["GATEWAY_OPCUA_OP_TIMEOUT_MS", "GATEWAY_OPCUAOPTIMEOUTMS"], 5000)?,
-            opcua_pki_dir: env_any(&["GATEWAY_OPCUA_PKI_DIR"])
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::temp_dir().join("scada-gateway-pki")),
+            opcua_cert: opcua_cert_from_env()?,
             opcua_trust_server_certs: env_bool(&["GATEWAY_OPCUA_TRUST_SERVER_CERTS"], false),
             modbus_op_timeout: env_ms(&["GATEWAY_MODBUS_OP_TIMEOUT_MS", "GATEWAY_MODBUSOPTIMEOUTMS"], 3000)?,
             pac_op_timeout: env_ms(&["GATEWAY_PAC_OP_TIMEOUT_MS", "GATEWAY_PACOPTIMEOUTMS"], 3000)?,
@@ -338,6 +338,27 @@ impl HaSettings {
             yield_after: env_ms(&["GATEWAY_HA_YIELD_AFTER_MS", "GATEWAY_HA_YIELDAFTERMS"], 30_000)?,
         })
     }
+}
+
+/// Сертификат OPC UA-клиента из окружения. Отдельно от остальных настроек: он же нужен подкоманде
+/// `scada-gateway opcua-cert`, которой Kafka и станция ни к чему.
+pub fn opcua_cert_from_env() -> Result<CertSettings> {
+    let own = match (env_any(&["GATEWAY_OPCUA_CERT_FILE"]), env_any(&["GATEWAY_OPCUA_KEY_FILE"])) {
+        (Some(cert), Some(key)) => Some((PathBuf::from(cert), PathBuf::from(key))),
+        (None, None) => None,
+        _ => bail!("GATEWAY_OPCUA_CERT_FILE и GATEWAY_OPCUA_KEY_FILE задаются вместе: сертификат и его закрытый ключ"),
+    };
+    let days = env_parse(&["GATEWAY_OPCUA_CERT_DAYS"], opcua_cert::DEFAULT_DAYS)?;
+    ensure!((1..=36_500).contains(&days), "GATEWAY_OPCUA_CERT_DAYS={days}: от 1 до 36500 дней");
+    Ok(CertSettings {
+        pki_dir: env_any(&["GATEWAY_OPCUA_PKI_DIR"])
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("scada-gateway-pki")),
+        own,
+        application_uri: env_or(&["GATEWAY_OPCUA_APPLICATION_URI"], opcua_cert::DEFAULT_APPLICATION_URI),
+        days,
+        warn_days: env_parse(&["GATEWAY_OPCUA_CERT_WARN_DAYS"], opcua_cert::DEFAULT_WARN_DAYS)?,
+    })
 }
 
 #[cfg(test)]
