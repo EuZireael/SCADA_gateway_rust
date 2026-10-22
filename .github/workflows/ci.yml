@@ -165,6 +165,43 @@ jobs:
           echo "=== simulator ==="; tail -50 "$RUNNER_TEMP/simulator.log" || true
           for f in /tmp/scada-gateway-it-*.log; do echo "=== $f ==="; tail -80 "$f"; done || true
 
+  # Клиент OPC UA против независимого сервера (OPC PLC, стек OPC Foundation .NET), а не async-opcua, на котором построены
+  # симулятор и фасад: строгость типов, пределы, защита, обрыв. См. tests/opcua_compat.rs и docs/DEVELOPMENT.md.
+  compat:
+    name: OPC UA против независимого сервера (OPC PLC)
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Имя хоста контейнера — localhost: клиент шлюза проверяет имя в сертификате сервера, и адрес opc.tcp://localhost
+      # должен в нём найтись.
+      - name: Start OPC PLC
+        run: |
+          docker run -d --name compat-opcplc --hostname localhost -p 50000:50000 \
+            -v "$PWD/tests/compat/opc_plc_nodes.json:/nodes/gateway.json:ro" \
+            mcr.microsoft.com/iotedge/opc-plc:2.15.11 \
+            --pn=50000 --aa --ut --nf=/nodes/gateway.json --sn=1200 --sr=3600 --st=uint --du=operator --dc=operator-pass
+          for _ in $(seq 60); do (echo > /dev/tcp/127.0.0.1/50000) 2>/dev/null && break; sleep 1; done
+          sleep 5
+
+      - name: Compatibility tests
+        env:
+          COMPAT_OPCUA_URL: opc.tcp://localhost:50000
+          COMPAT_OPCUA_CONTAINER: compat-opcplc
+        run: cargo test --locked --test opcua_compat -- --ignored
+
+      - name: Server log on failure
+        if: failure()
+        run: docker logs compat-opcplc 2>&1 | tail -80
+
   # Стенд целиком (docker-compose.yml: Kafka + Postgres + Rust-симулятор + Rust-шлюз, образы из исходников)
   # и сбои, которые бывают на объекте: пропал брокер, БД, ПЛК. См. scripts/stack_smoke.sh.
   stack:
@@ -256,7 +293,7 @@ jobs:
   release:
     name: GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [integration, docker, stack, load]
+    needs: [integration, docker, stack, load, compat]
     runs-on: ubuntu-latest
     permissions:
       contents: write

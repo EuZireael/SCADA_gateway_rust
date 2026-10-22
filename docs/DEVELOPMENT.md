@@ -60,6 +60,7 @@ curl localhost:8888/actuator/health
 |---|---|---|---|
 | **Юнит** | `cargo test` | ничего | фильтр «по исключению», команды, конфигурация и её проверка, песочница и скрипты, HA-логика, формат сообщений, сверка `controllers.yaml` ↔ конфигурация симулятора; `tests/opcua_server.rs` — клиент OPC UA против сервера в том же процессе (строгая проверка типа записи, предел `MaxNodesPerRead`, неизвестные узлы, `nsu=`) |
 | **Интеграционные** | `cargo test -- --ignored` | симулятор, Kafka, (Postgres) | клиенты протоколов, шлюз целиком глазами монитора, обрыв связи через TCP-прокси, горячий резерв (`kill -9`), REST под токеном, защищённый OPC UA, проверка эффекта записи, TLS к БД |
+| **Совместимость OPC UA** | `cargo test --test opcua_compat -- --ignored` | docker (OPC PLC) | клиент шлюза против независимого сервера другого стека: все скалярные типы, строгая проверка типа записи, `MaxNodesPerRead`, защищённый канал с паролем и доверие сертификату, обрыв; см. ниже |
 | **Стенд** | `scripts/stack_smoke.sh` | docker compose | `docker compose` из исходников и сбои: пропали Kafka, БД, ПЛК |
 | **Сравнение протоколов** | `scripts/compare_protocols.py` | docker, прошивка ptusa (`--source firmware`) или симулятор | EasyDriver (PAC) и OPC UA на одной станции: охват, нагрузка, запись, обрыв; `docs/PROTOCOL_COMPARISON.md` |
 | **Нагрузка** | `scripts/load_check.sh` | docker (Kafka) | 27 400 тегов: опрос не отстаёт, нет потерь и перезапусков, память < 500 МБ |
@@ -90,6 +91,31 @@ IT_DATABASE_TLS_CA=target/pg-tls/ca.crt` (`tests/db_tls.rs`). Симулятор
 | `IT_DATABASE_URL` | не задан | если задан — шлюз в тесте работает с БД, проверяются журнал и REST |
 | `IT_HA_SESSION_MS` | `2000` | сессия выборов в тестах HA (брокеру CI нужно ≥ 6000) |
 
+### Совместимость с независимым сервером OPC UA
+
+Симулятор и фасад `ptusa-opcua` построены на той же библиотеке `async-opcua`, что и клиент шлюза, поэтому ошибки, общие
+для клиента и сервера одной библиотеки, они не ловят. `tests/opcua_compat.rs` проверяет клиент против
+[OPC PLC](https://github.com/Azure-Samples/iot-edge-opc-plc) — сервера на стеке OPC Foundation .NET (в CI — задание `compat`):
+
+```bash
+docker run -d --name compat-opcplc --hostname localhost -p 50000:50000 \
+  -v "$PWD/tests/compat/opc_plc_nodes.json:/nodes/gateway.json:ro" \
+  mcr.microsoft.com/iotedge/opc-plc:2.15.11 \
+  --pn=50000 --aa --ut --nf=/nodes/gateway.json --sn=1200 --sr=3600 --st=uint --du=operator --dc=operator-pass
+COMPAT_OPCUA_URL=opc.tcp://localhost:50000 COMPAT_OPCUA_CONTAINER=compat-opcplc \
+  cargo test --test opcua_compat -- --ignored
+```
+
+Узлы `Gw.*` (12 скалярных типов, массив, `DateTime`) — в `tests/compat/opc_plc_nodes.json`, 1200 узлов `SlowUInt*` создаёт
+сам сервер (`--sn`). `COMPAT_OPCUA_USER`/`COMPAT_OPCUA_PASSWORD` — как `--du`/`--dc` (по умолчанию `operator` /
+`operator-pass`). Без `COMPAT_OPCUA_URL` тесты пропускаются, без `COMPAT_OPCUA_CONTAINER` пропускается проверка обрыва
+(она останавливает и запускает контейнер).
+
+**Адрес сервера — по имени из его сертификата.** Клиент проверяет имя хоста в сертификате сервера: сертификат OPC PLC
+выписан на имя контейнера, и подключение к `127.0.0.1` отвергается с `BadCertificateHostNameInvalid`. Поэтому контейнеру
+задано `--hostname localhost`, а адрес — `opc.tcp://localhost:50000`. На объекте то же: ПЛК надо адресовать так, как он назван
+в своём сертификате.
+
 ### Подводные камни
 
 * **Тесты внутри одного файла идут параллельно.** Два теста не должны менять один прибор симулятора (например,
@@ -116,7 +142,8 @@ flowchart LR
     check --> docker["docker<br/>образ GHCR"]
     stack["stack<br/>docker compose + сбои"]
     load["load<br/>27 400 тегов"]
-    integration & docker & stack & load --> release["release (только тег v*)<br/>GitHub Release"]
+    compat["compat<br/>OPC UA против OPC PLC"]
+    integration & docker & stack & load & compat --> release["release (только тег v*)<br/>GitHub Release"]
 ```
 
 * Предупреждения clippy и rustdoc — ошибки; недокументированный публичный элемент — предупреждение, то есть тоже ошибка.
