@@ -53,3 +53,9 @@ access   WATCHDOG M             RW
 access   WATCHDOG ST            RO
 access   WATCHDOG P_T_ERR       RW
 access   WATCHDOG P_T_GEN       RW
+
+# Пределы значения команды (writeMin/writeMax тега, включительно; «-» — предел не задан): команда
+# вне них в ПЛК не уходит (REJECTED_OUT_OF_RANGE). В единицах значения, как его видит оператор.
+# Заполняет технолог станции по допустимым уставкам; поле — как в access (массив без индекса,
+# RT_PAR_F — с индексом).
+#   limits <вид> <поле> <MIN|-> <MAX|->

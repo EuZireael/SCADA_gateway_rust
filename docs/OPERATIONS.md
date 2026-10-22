@@ -136,6 +136,7 @@ docker run -d --name scada-gateway -p 8888:8888 \
 | `REJECTED_UNKNOWN_TAG` | такого тега нет |
 | `REJECTED_NOT_WRITABLE` | тег только для чтения (или контроллер не принял запись как неразрешённую) |
 | `REJECTED_TYPE_MISMATCH` | значение не приводится к типу тега / сервер отверг тип |
+| `REJECTED_OUT_OF_RANGE` | значение вне `writeMin`/`writeMax` тега; пределы — в `message` |
 | `REJECTED_EXPIRED` | команда ждала дольше `GATEWAY_COMMANDS_MAX_AGE_MS` (шлюз был недоступен) |
 | `FAILED_NO_CONNECTION` | нет связи с контроллером |
 | `FAILED_WRITE` | контроллер ответил отказом |

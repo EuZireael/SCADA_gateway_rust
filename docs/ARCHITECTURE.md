@@ -167,7 +167,8 @@ flowchart TD
     D -->|"нет"| E["command::execute"]
     E --> F{"тег найден?"} -->|"нет"| R2["REJECTED_UNKNOWN_TAG"]
     F -->|"да"| G{"Modbus или writable=false?"} -->|"да"| R3["REJECTED_NOT_WRITABLE"]
-    G -->|"нет"| H["скрипт канала: write(), затем coerce по типу тега<br/>(OPC UA — по типу узла)"]
+    G -->|"нет"| P{"writeMin/writeMax заданы<br/>и значение вне них?"} -->|"да"| R5["REJECTED_OUT_OF_RANGE"]
+    P -->|"нет"| H["скрипт канала: write(), затем coerce по типу тега<br/>(OPC UA — по типу узла)"]
     H -->|"ошибка"| R4["REJECTED_TYPE_MISMATCH"]
     H -->|"ок"| I{"протокол"}
     I -->|"OPC UA"| J["Write → статус сервера"]
@@ -177,7 +178,7 @@ flowchart TD
     L -->|"нет"| N["APPLIED"]
     M --> N
     K --> N
-    N & R1 & R2 & R3 & R4 --> O["scada-command-results + событие COMMAND + метрика"]
+    N & R1 & R2 & R3 & R4 & R5 --> O["scada-command-results + событие COMMAND + метрика"]
 ```
 
 Решения, которые стоит знать:
