@@ -9,7 +9,9 @@ description = "OPC UA-фасад эмулятора мойки: все кана�
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.5"
 async-opcua = { version = "0.19.0", features = ["server"] }
+async-trait = "0.1"
 flate2 = "1"
 mlua = { version = "0.12.1", features = ["lua51", "vendored", "send"] }
 serde = { version = "1", features = ["derive"] }
@@ -23,3 +25,9 @@ async-opcua = { version = "0.19.0", features = ["server", "client"] }
 
 [profile.release]
 lto = "thin"
+
+# Хеширование паролей (argon2) в сборке для тестов без оптимизации занимает секунды.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

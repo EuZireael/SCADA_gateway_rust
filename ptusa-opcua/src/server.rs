@@ -9,20 +9,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
-use opcua::crypto::SecurityPolicy;
 use opcua::server::address_space::{ObjectBuilder, VariableBuilder};
 use opcua::server::diagnostics::NamespaceMetadata;
 use opcua::server::node_manager::memory::{SimpleNodeManager, simple_node_manager};
 use opcua::server::{Server, ServerBuilder, ServerHandle};
-use opcua::types::{DataTypeId, DataValue, DateTime, MessageSecurityMode, NodeId, ObjectId, StatusCode, Variant};
+use opcua::types::{DataTypeId, DataValue, DateTime, NodeId, ObjectId, StatusCode, Variant};
 use tracing::{info, warn};
 
 use crate::channel::{Channel, Converted, Kind, command_text, convert};
 use crate::pac::PacClient;
+use crate::security::{Security, warn_if_expiring};
 use crate::snapshot::Snapshot;
 
 /// Пространство имён узлов станции; обязано получить индекс 2 (адреса узлов в базе каналов — `ns=2;s=…`).
 pub const NAMESPACE_URI: &str = "urn:savushkin:ptusa";
+/// URI приложения сервера (он же первое альтернативное имя его сертификата).
+pub const APPLICATION_URI: &str = "urn:savushkin:ptusa-opcua";
 /// Как часто писать в журнал сводку (снимки, команды, каналы без значения).
 const REPORT_EVERY: Duration = Duration::from_secs(60);
 
@@ -327,17 +329,31 @@ pub fn build(
     stats: Arc<Stats>,
     announce: &str,
     bind: (String, u16),
+    security: &Security,
 ) -> Result<(Server, Pusher)> {
-    let pki = std::env::temp_dir().join(format!("ptusa-opcua-pki-{}-{}", std::process::id(), bind.1));
-    let (server, handle) = ServerBuilder::new_anonymous("ptusa (эмулятор мойки) — OPC UA-фасад")
-        .application_uri("urn:savushkin:ptusa-opcua")
-        .product_uri("urn:savushkin:ptusa-opcua")
+    let mut builder = ServerBuilder::new()
+        .application_name("ptusa (эмулятор мойки) — OPC UA-фасад")
+        .application_uri(APPLICATION_URI)
+        .product_uri(APPLICATION_URI)
         .host(bind.0)
         .port(bind.1)
-        .pki_dir(pki)
-        .create_sample_keypair(true)
-        .trust_client_certs(true)
-        .add_endpoint("none", ("/", SecurityPolicy::None, MessageSecurityMode::None, &["ANONYMOUS"] as &[&str]))
+        .pki_dir(&security.pki_dir)
+        .trust_client_certs(security.trust_all_clients)
+        .with_authenticator(security.authenticator());
+    // Сертификат выпускается и для стенда без защиты: без него сервер на каждом запуске пишет в журнал ошибку.
+    let cert = security.ensure_cert(APPLICATION_URI)?;
+    warn_if_expiring(&cert);
+    builder = builder.certificate_path(&cert.cert_path).private_key_path(&cert.key_path).create_sample_keypair(false);
+    for (policy, mode) in &security.endpoints {
+        let ids = security.token_ids(*policy);
+        let id = format!("{policy:?}_{mode:?}").to_ascii_lowercase();
+        builder =
+            builder.add_endpoint(id, ("/", *policy, *mode, &ids.iter().map(String::as_str).collect::<Vec<_>>()[..]));
+    }
+    for (id, token) in security.user_tokens() {
+        builder = builder.add_user_token(id, token);
+    }
+    let (server, handle) = builder
         .discovery_urls(vec![announce.to_string()])
         .with_node_manager(simple_node_manager(
             NamespaceMetadata { namespace_uri: NAMESPACE_URI.into(), ..Default::default() },

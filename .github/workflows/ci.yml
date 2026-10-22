@@ -131,6 +131,7 @@ jobs:
           workspaces: |
             .
             simulator
+            ptusa-opcua
 
       - name: Start PLC simulator
         run: |
@@ -142,6 +143,21 @@ jobs:
           done
           for _ in $(seq 60); do (echo > /dev/tcp/127.0.0.1/9092) 2>/dev/null && break; sleep 1; done
           tail -3 "$RUNNER_TEMP/simulator.log"
+
+      # Защищённый фасад поверх PAC симулятора: два пользователя (роли write и read), канал Basic256Sha256. Шлюз против него —
+      # tests/facade_secure.rs.
+      - name: Start secured OPC UA facade
+        run: |
+          cargo build --release --locked --manifest-path ptusa-opcua/Cargo.toml
+          F=ptusa-opcua/target/release/ptusa-opcua
+          printf 'anna %s write\nboris %s read\n' \
+            "$(echo anna-pass | $F hash-password)" "$(echo boris-pass | $F hash-password)" > "$RUNNER_TEMP/opcua-users"
+          PAC_HOST=127.0.0.1 PAC_PORT=10000 STATION_CONFIG=config/stations/BN1_MCA1.yaml \
+            OPCUA_BIND=127.0.0.1:4870 OPCUA_ENDPOINT=opc.tcp://localhost:4870 \
+            OPCUA_USERS_FILE="$RUNNER_TEMP/opcua-users" OPCUA_PKI_DIR="$RUNNER_TEMP/facade-pki" OPCUA_TRUST_ALL_CLIENTS=true \
+            nohup $F > "$RUNNER_TEMP/facade.log" 2>&1 &
+          for _ in $(seq 60); do (echo > /dev/tcp/127.0.0.1/4870) 2>/dev/null && break; sleep 1; done
+          tail -3 "$RUNNER_TEMP/facade.log"
 
       - name: Правила записи PAC соответствуют конфигурации (simulator conformance)
         run: |
@@ -162,12 +178,16 @@ jobs:
           # Сессия выборов резервирования: брокер service-контейнера с настройками по умолчанию
           # (любая переменная KAFKA_* отключает его конфиг по умолчанию) принимает не меньше 6 c.
           IT_HA_SESSION_MS: "6000"
+          IT_FACADE_URL: opc.tcp://localhost:4870
+          IT_FACADE_WRITER: anna:anna-pass
+          IT_FACADE_READER: boris:boris-pass
         run: cargo test --locked -- --ignored
 
       - name: Logs on failure
         if: failure()
         run: |
           echo "=== simulator ==="; tail -50 "$RUNNER_TEMP/simulator.log" || true
+          echo "=== facade ==="; tail -50 "$RUNNER_TEMP/facade.log" || true
           for f in /tmp/scada-gateway-it-*.log; do echo "=== $f ==="; tail -80 "$f"; done || true
 
   # Клиент OPC UA против независимого сервера (OPC PLC, стек OPC Foundation .NET), а не async-opcua, на котором построены
