@@ -1,6 +1,7 @@
 //! OPC UA-фасад эмулятора мойки (см. документацию библиотеки).
 //!
 //!   ptusa-opcua              запуск
+//!   ptusa-opcua hash-password  хеш пароля для OPCUA_USERS_FILE (пароль со стандартного ввода)
 //!   ptusa-opcua healthcheck  проверка живости для контейнера: порт OPC UA открыт и прошивка отвечает (при PAC_NAME — своё имя)
 //!
 //! Окружение:
@@ -13,6 +14,8 @@
 //!   OPCUA_ENDPOINT       адрес, который сервер называет в FindServers (по умолчанию opc.tcp://localhost:4840);
 //!                        конечные точки GetEndpoints строятся из OPCUA_BIND — клиент (шлюз) подключается
 //!                        по адресу, который знает сам
+//!   OPCUA_SECURITY, OPCUA_USERS_FILE, OPCUA_ALLOW_ANONYMOUS, OPCUA_PKI_DIR, OPCUA_TRUST_ALL_CLIENTS, OPCUA_CERT_DAYS,
+//!                        OPCUA_CERT_HOSTS — защита фасада, см. `ptusa_opcua::security`; без них фасад не стартует
 //!   POLL_MS              период снимка, по умолчанию 500
 //!   RUST_LOG             уровни журнала
 
@@ -23,6 +26,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use ptusa_opcua::channel::load_channels;
 use ptusa_opcua::pac::PacClient;
+use ptusa_opcua::security::{Security, hash_password};
 use ptusa_opcua::server::{Bridge, Stats, build, parse_bind};
 use ptusa_opcua::snapshot::Snapshot;
 use tracing::{info, warn};
@@ -47,6 +51,14 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,opcua=warn".into()),
         )
         .init();
+    if std::env::args().nth(1).as_deref() == Some("hash-password") {
+        let mut password = String::new();
+        std::io::stdin().read_line(&mut password).context("пароль со стандартного ввода")?;
+        let password = password.trim_end_matches(['\r', '\n']);
+        anyhow::ensure!(!password.is_empty(), "пустой пароль");
+        println!("{}", hash_password(password)?);
+        return Ok(());
+    }
     let bind = parse_bind(&env("OPCUA_BIND", "0.0.0.0:4840"))?;
     if std::env::args().nth(1).as_deref() == Some("healthcheck") {
         let port = bind.1;
@@ -65,7 +77,17 @@ async fn main() -> Result<()> {
     let pac = Arc::new(pac_client()?);
     let stats = Arc::new(Stats::default());
     let announce = env("OPCUA_ENDPOINT", "opc.tcp://localhost:4840");
-    let (server, pusher) = build(&channels, pac.clone(), stats.clone(), &announce, bind.clone())?;
+    let announce_host =
+        announce.strip_prefix("opc.tcp://").and_then(|r| parse_bind(r.split('/').next()?).ok()).map(|(h, _)| h);
+    let security = Security::from_env(|n| std::env::var(n).ok(), announce_host.as_deref().unwrap_or_default())?;
+    for line in security.summary() {
+        if line.starts_with('⚠') {
+            warn!("{line}");
+        } else {
+            info!("{line}");
+        }
+    }
+    let (server, pusher) = build(&channels, pac.clone(), stats.clone(), &announce, bind.clone(), &security)?;
     info!("OPC UA на {}:{}, прошивка {}:{}, снимок раз в {poll_ms} мс", bind.0, bind.1, pac.host, pac.port);
 
     let bridge =

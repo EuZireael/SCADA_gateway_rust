@@ -116,6 +116,13 @@ services:
       # адрес, по которому они сюда доходят.
       OPCUA_ENDPOINT: "${OPCUA_ENDPOINT:-opc.tcp://localhost:4840}"
       OPCUA_BIND: "0.0.0.0:4840"
+      # СТЕНД, НЕ БОЕВОЙ ЗАПУСК: без этих трёх строк фасад не стартует. Они открывают его для всех, кто достучится
+      # до порта 4840: анонимный вход, канал без защиты, любые сертификаты клиентов — читать значения и писать
+      # команды в прошивку сможет кто угодно. Для боевого запуска — OPCUA_USERS_FILE и защищённый канал
+      # (см. ptusa-opcua/README.md, docs/OPERATIONS.md).
+      OPCUA_SECURITY: "None"
+      OPCUA_ALLOW_ANONYMOUS: "true"
+      OPCUA_TRUST_ALL_CLIENTS: "true"
     volumes:
       - ./config/stations/BN1_MCA1.yaml:/config/station.yaml:ro
     ports:

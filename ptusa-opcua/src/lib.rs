@@ -21,5 +21,6 @@ pub mod channel;
 pub mod pac;
 pub mod protocol;
 pub mod sandbox;
+pub mod security;
 pub mod server;
 pub mod snapshot;
