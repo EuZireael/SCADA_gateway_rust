@@ -256,7 +256,11 @@ class Firmware:
         if mode == "opcua":
             self.facade = Proc([str(FACADE)], {"PAC_HOST": "127.0.0.1", "PAC_PORT": str(PTUSA_PAC_PORT),
                                                "STATION_CONFIG": str(STATIONS["opcua"]), "OPCUA_BIND": f"0.0.0.0:{FACADE_PORT}",
-                                               "POLL_MS": FACADE_POLL_MS, "OPCUA_ENDPOINT": f"opc.tcp://127.0.0.1:{FACADE_PORT}"},
+                                               "POLL_MS": FACADE_POLL_MS, "OPCUA_ENDPOINT": f"opc.tcp://127.0.0.1:{FACADE_PORT}",
+                                               # измерительный стенд на одной машине: фасад открыт, без защиты
+                                               "OPCUA_SECURITY": "None", "OPCUA_ALLOW_ANONYMOUS": "true",
+                                               "OPCUA_TRUST_ALL_CLIENTS": "true",
+                                               "OPCUA_PKI_DIR": str(self.workdir / "facade-pki")},
                                self.workdir / "facade.log")
             wait_port(FACADE_PORT)
             time.sleep(3)

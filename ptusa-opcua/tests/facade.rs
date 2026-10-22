@@ -12,6 +12,7 @@ use opcua::types::{
 };
 use ptusa_opcua::channel::load_channels;
 use ptusa_opcua::pac::PacClient;
+use ptusa_opcua::security::{Security, hash_password, parse_users};
 use ptusa_opcua::server::{Bridge, Stats, build};
 use ptusa_opcua::snapshot::Snapshot;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -177,6 +178,8 @@ struct Stand {
     pac: FakePac,
     pac_state: Arc<Mutex<PacState>>,
     session: Arc<Session>,
+    port: u16,
+    pki: std::path::PathBuf,
     tasks: Vec<JoinHandle<()>>,
     stats: Arc<Stats>,
 }
@@ -192,6 +195,21 @@ impl Stand {
 
     /// Фасад со сверкой имени прошивки (`PAC_NAME`): `expected` — ожидаемое имя.
     async fn start_expecting(poll: Duration, expected: Option<&str>) -> Stand {
+        let pki = std::env::temp_dir().join(format!("ptusa-opcua-it-pki-{}-{}", std::process::id(), free_port()));
+        Stand::start_with(poll, expected, Security::open(pki), None).await
+    }
+
+    /// Фасад с заданной защитой; `login` — как подключается сессия стенда (`None` — анонимно без защиты канала).
+    async fn start_with(
+        poll: Duration,
+        expected: Option<&str>,
+        security: Security,
+        login: Option<(&str, MessageSecurityMode, IdentityToken)>,
+    ) -> Stand {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()))
+            .with_test_writer()
+            .try_init();
         let dir = std::env::temp_dir().join(format!("ptusa-opcua-it-{}-{}", std::process::id(), free_port()));
         std::fs::create_dir_all(&dir).unwrap();
         let tags: Vec<String> = CHANNELS
@@ -217,6 +235,7 @@ impl Stand {
             stats.clone(),
             &format!("opc.tcp://127.0.0.1:{opc_port}"),
             ("127.0.0.1".into(), opc_port),
+            &security,
         )
         .unwrap();
         let bridge = Bridge {
@@ -234,8 +253,13 @@ impl Stand {
             tokio::spawn(bridge.run()),
         ];
         tokio::time::sleep(Duration::from_millis(800)).await;
-        let session = connect(opc_port).await;
-        Stand { pac, pac_state, session, tasks, stats }
+        let session = match login {
+            None => connect(opc_port).await,
+            Some((policy, mode, identity)) => {
+                try_connect(opc_port, policy, mode, identity, Some(&security.pki_dir)).await.expect("вход стенда")
+            }
+        };
+        Stand { pac, pac_state, session, port: opc_port, pki: security.pki_dir.clone(), tasks, stats }
     }
 
     fn node(&self, name: &str) -> NodeId {
@@ -250,13 +274,17 @@ impl Stand {
     }
 
     async fn write(&self, name: &str, value: Variant) -> StatusCode {
+        self.write_on(&self.session, name, value).await
+    }
+
+    async fn write_on(&self, session: &Session, name: &str, value: Variant) -> StatusCode {
         let w = WriteValue {
             node_id: self.node(name),
             attribute_id: AttributeId::Value as u32,
             index_range: NumericRange::None,
             value: DataValue::value_only(value),
         };
-        self.session.write(&[w]).await.unwrap().remove(0)
+        session.write(&[w]).await.unwrap().remove(0)
     }
 
     fn commands(&self) -> Vec<String> {
@@ -271,6 +299,57 @@ impl Drop for Stand {
             t.abort();
         }
     }
+}
+
+/// Подключение с политикой, режимом и пользователем; `trust_in` — каталог PKI сервера, куда положить сертификат клиента
+/// как доверенный (`None` — клиент сервером не доверен). `None` в ответе — сервер отказал.
+async fn try_connect(
+    port: u16,
+    policy: &str,
+    mode: MessageSecurityMode,
+    identity: IdentityToken,
+    trust_in: Option<&std::path::Path>,
+) -> Option<Arc<Session>> {
+    // Выпуск ключа клиента в отладочной сборке занимает секунды: доверенные подключения делят одну пару, «чужому» клиенту
+    // нужна своя.
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let id = if trust_in.is_some() { 0 } else { 1 + N.fetch_add(1, std::sync::atomic::Ordering::SeqCst) };
+    let pki = std::env::temp_dir().join(format!("ptusa-opcua-client-pki-{}-{id}", std::process::id()));
+    let mut client = ClientBuilder::new()
+        .application_name("ptusa-opcua test")
+        .application_uri("urn:test")
+        .product_uri("urn:test")
+        .pki_dir(&pki)
+        .create_sample_keypair(true)
+        .trust_server_certs(true)
+        .session_retry_limit(0)
+        .client()
+        .unwrap();
+    if let Some(server_pki) = trust_in {
+        let trusted = server_pki.join("trusted");
+        std::fs::create_dir_all(&trusted).unwrap();
+        // Сервер ищет доверенный сертификат по имени файла, которое строит сам (как в `rejected/` при первой попытке).
+        let cert = opcua::crypto::CertificateStore::read_cert(&pki.join("own").join("cert.der")).unwrap();
+        std::fs::copy(
+            pki.join("own").join("cert.der"),
+            trusted.join(opcua::crypto::CertificateStore::cert_file_name(&cert)),
+        )
+        .unwrap();
+    }
+    // Конечные точки запрашиваем у сервера: политика токена «логин/пароль» у него своя.
+    let url = format!("opc.tcp://127.0.0.1:{port}");
+    let endpoint: EndpointDescription = (url.as_str(), policy, mode).into();
+    let opened =
+        tokio::time::timeout(Duration::from_secs(10), client.connect_to_matching_endpoint(endpoint, identity)).await;
+    let Ok(Ok((session, event_loop))) = opened else {
+        eprintln!("подключение {policy}/{mode:?}: {:?}", opened.as_ref().map(|r| r.as_ref().err()));
+        Box::leak(Box::new(client));
+        return None;
+    };
+    event_loop.spawn();
+    let connected = tokio::time::timeout(Duration::from_secs(10), session.wait_for_connection()).await.unwrap_or(false);
+    Box::leak(Box::new(client));
+    connected.then_some(session)
 }
 
 async fn connect(port: u16) -> Arc<Session> {
@@ -475,6 +554,100 @@ async fn writes_during_fast_polling_do_not_freeze_the_server() {
             assert_eq!(status, StatusCode::Good, "запись {i}");
         }
         reader.abort();
+    })
+    .await
+    .expect("тест завис");
+}
+
+// ------------------------------------------------------------------------ защита --
+
+const SIGN_ENCRYPT: MessageSecurityMode = MessageSecurityMode::SignAndEncrypt;
+const POLICY: &str = "Basic256Sha256";
+
+/// Защита из двух пользователей: `anna` (запись) и `boris` (только чтение); анонимный вход выключен, клиенты — только из `trusted/`.
+fn secured(name: &str) -> Security {
+    let pki = std::env::temp_dir().join(format!("ptusa-opcua-it-pki-{name}-{}-{}", std::process::id(), free_port()));
+    let users = parse_users(&format!(
+        "anna {} write\nboris {} read\n",
+        hash_password("anna-pass").unwrap(),
+        hash_password("boris-pass").unwrap()
+    ))
+    .unwrap();
+    Security {
+        endpoints: vec![(opcua::crypto::SecurityPolicy::Basic256Sha256, SIGN_ENCRYPT)],
+        allow_anonymous: false,
+        users,
+        pki_dir: pki,
+        trust_all_clients: false,
+        cert_days: 30,
+        cert_hosts: vec!["127.0.0.1".into()],
+    }
+}
+
+fn user(name: &str, pass: &str) -> IdentityToken {
+    IdentityToken::new_user_name(name.to_string(), pass.to_string())
+}
+
+/// Защищённое подключение с паролем работает; анонимный вход, чужой пароль и неизвестный сертификат клиента отклоняются;
+/// запись разрешена только роли `write`, чтение — обеим; в прошивку уходит одна команда — от `write`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn secured_facade_requires_a_password_a_trusted_certificate_and_the_write_role() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let security = secured("roles");
+        let s = Stand::start_with(
+            Duration::from_millis(100),
+            None,
+            security,
+            Some((POLICY, SIGN_ENCRYPT, user("anna", "anna-pass"))),
+        )
+        .await;
+
+        // Чтение и запись роли write.
+        assert_eq!(int(&s.read("LINE1V0.ST").await.0), Some(0));
+        assert_eq!(s.write("LINE1V0.M", Variant::Int32(1)).await, StatusCode::Good);
+
+        // Роль read: подключается, читает, писать не может.
+        let boris = try_connect(s.port, POLICY, SIGN_ENCRYPT, user("boris", "boris-pass"), Some(&s.pki))
+            .await
+            .expect("boris подключается");
+        let rv = ReadValueId::from(s.node("LINE1V0.ST"));
+        let dv = boris.read(&[rv], TimestampsToReturn::Both, 0.0).await.unwrap().remove(0);
+        assert_eq!(dv.status.unwrap_or(StatusCode::Good), StatusCode::Good);
+        assert_eq!(s.write_on(&boris, "LINE1V0.M", Variant::Int32(0)).await, StatusCode::BadUserAccessDenied);
+
+        // Анонимный вход, неверный пароль и неизвестный пользователь отклонены.
+        assert!(try_connect(s.port, POLICY, SIGN_ENCRYPT, IdentityToken::Anonymous, Some(&s.pki)).await.is_none());
+        assert!(try_connect(s.port, POLICY, SIGN_ENCRYPT, user("anna", "wrong"), Some(&s.pki)).await.is_none());
+        assert!(try_connect(s.port, POLICY, SIGN_ENCRYPT, user("nobody", "anna-pass"), Some(&s.pki)).await.is_none());
+        // Канала без защиты у фасада нет.
+        assert!(try_connect(s.port, "None", MessageSecurityMode::None, IdentityToken::Anonymous, None).await.is_none());
+        // Чужой сертификат клиента (его нет в trusted/) отклонён, даже с верным паролем.
+        assert!(try_connect(s.port, POLICY, SIGN_ENCRYPT, user("anna", "anna-pass"), None).await.is_none());
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(s.commands(), ["__LINE1V0:set_cmd('M', 1, 1)"], "в прошивку ушла только команда роли write");
+    })
+    .await
+    .expect("тест завис");
+}
+
+/// Стенд с явно разрешённым анонимным входом: анонимный клиент по защищённому каналу подключается; пользователей нет.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn anonymous_login_works_only_when_it_is_enabled() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mut security = secured("anon");
+        security.users.clear();
+        security.allow_anonymous = true;
+        security.trust_all_clients = true;
+        let s = Stand::start_with(
+            Duration::from_millis(100),
+            None,
+            security,
+            Some((POLICY, SIGN_ENCRYPT, IdentityToken::Anonymous)),
+        )
+        .await;
+        assert_eq!(int(&s.read("LINE1V0.ST").await.0), Some(0));
+        assert_eq!(s.write("LINE1V0.M", Variant::Int32(1)).await, StatusCode::Good);
     })
     .await
     .expect("тест завис");

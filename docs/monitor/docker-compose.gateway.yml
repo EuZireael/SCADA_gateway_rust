@@ -61,6 +61,10 @@ services:
       PAC_PORT: "10000"
       STATION_CONFIG: /config/station.yaml
       OPCUA_ENDPOINT: "opc.tcp://localhost:4840"
+      # СТЕНД: открывает фасад всем, кто достучится до порта 4840 (анонимный вход, канал без защиты) — не для боевого запуска.
+      OPCUA_SECURITY: "None"
+      OPCUA_ALLOW_ANONYMOUS: "true"
+      OPCUA_TRUST_ALL_CLIENTS: "true"
     volumes:
       - ${SCADA_GATEWAY_PATH}/config/stations/BN1_MCA1.yaml:/config/station.yaml:ro
     ports:
