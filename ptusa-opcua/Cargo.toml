@@ -9,7 +9,7 @@ description = "OPC UA-фасад эмулятора мойки: все кана�
 
 [dependencies]
 anyhow = "1"
-argon2 = "0.5"
+argon2 = "0.6"
 async-opcua = { version = "0.19.0", features = ["server"] }
 async-trait = "0.1"
 flate2 = "1"
