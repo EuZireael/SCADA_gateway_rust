@@ -293,6 +293,8 @@ pub struct Controller {
     pub tags: Vec<Arc<Tag>>,
     /// Защита соединения (только OPC UA).
     pub opc_security: OpcSecurity,
+    /// Как опознать контроллер при подключении; `None` — имя не сверяется.
+    pub identity: Option<crate::config::IdentityConfig>,
 }
 
 impl Controller {
@@ -305,6 +307,7 @@ impl Controller {
             kind: ControllerKind::from_endpoint(&cfg.endpoint)?,
             enabled: cfg.enabled,
             opc_security: cfg.opc_security().unwrap_or_default(),
+            identity: cfg.identity.clone(),
             tags: cfg
                 .tags
                 .iter()
@@ -568,6 +571,7 @@ mod tests {
             username: None,
             password: None,
             enabled: true,
+            identity: None,
             tags: vec![t.clone()],
         };
         assert_eq!(Controller::from_config(&s).unwrap().cycle_period_ms(), 2000);

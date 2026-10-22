@@ -187,6 +187,11 @@ impl Stand {
     }
 
     async fn start_polling(poll: Duration) -> Stand {
+        Stand::start_expecting(poll, None).await
+    }
+
+    /// Фасад со сверкой имени прошивки (`PAC_NAME`): `expected` — ожидаемое имя.
+    async fn start_expecting(poll: Duration, expected: Option<&str>) -> Stand {
         let dir = std::env::temp_dir().join(format!("ptusa-opcua-it-{}-{}", std::process::id(), free_port()));
         std::fs::create_dir_all(&dir).unwrap();
         let tags: Vec<String> = CHANNELS
@@ -201,7 +206,9 @@ impl Stand {
 
         let pac_state = Arc::new(Mutex::new(PacState::new()));
         let pac = FakePac::start(0, pac_state.clone()).await;
-        let client = Arc::new(PacClient::new("127.0.0.1", pac.port, Duration::from_secs(1)));
+        let client = Arc::new(
+            PacClient::new("127.0.0.1", pac.port, Duration::from_secs(1)).expecting_name(expected.map(str::to_string)),
+        );
         let stats = Arc::new(Stats::default());
         let opc_port = free_port();
         let (server, pusher) = build(
@@ -303,6 +310,37 @@ fn float(v: &Option<Variant>) -> Option<f32> {
 }
 
 // ----------------------------------------------------------------------- сценарии --
+
+/// Имя прошивки и связь с ней — узлами `SYSTEM.PAC_NAME` и `SYSTEM.LINK_OK`; тот же объект `SYSTEM`, что и у прибора прошивки.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn system_nodes_report_the_firmware_name_and_link() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let s = Stand::start_expecting(Duration::from_millis(100), Some("FAKE")).await;
+        assert_eq!(s.read("SYSTEM.PAC_NAME").await, (Some(Variant::from("FAKE")), StatusCode::Good));
+        assert_eq!(s.read("SYSTEM.LINK_OK").await, (Some(Variant::Boolean(true)), StatusCode::Good));
+        let (v, st) = s.read("SYSTEM.UP_TIME").await;
+        assert_eq!((v, st), (Some(Variant::from("0 дн. 00:00:20")), StatusCode::Good), "прибор SYSTEM не затронут");
+    })
+    .await
+    .expect("тест завис");
+}
+
+/// Прошивка назвала себя иначе, чем ожидалось (`PAC_NAME`): значений чужой станции фасад не отдаёт, команды в неё не идут.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_firmware_is_not_served_and_gets_no_commands() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let s = Stand::start_expecting(Duration::from_millis(100), Some("BN1-МСА1")).await;
+        assert_eq!(s.read("LINE1V0.ST").await.1, StatusCode::BadCommunicationError);
+        assert_eq!(s.read("LINE1TE1.V").await.1, StatusCode::BadCommunicationError);
+        assert_eq!(s.read("SYSTEM.LINK_OK").await, (Some(Variant::Boolean(false)), StatusCode::Good));
+        // Имя — то, что назвала прошивка: по нему видно, к чему подключились.
+        assert_eq!(s.read("SYSTEM.PAC_NAME").await, (Some(Variant::from("FAKE")), StatusCode::Good));
+        assert_eq!(s.write("LINE1V0.M", Variant::Int32(1)).await, StatusCode::BadCommunicationError);
+        assert!(s.commands().is_empty(), "в чужую прошивку ушла команда: {:?}", s.commands());
+    })
+    .await
+    .expect("тест завис");
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reads_writes_and_faults() {

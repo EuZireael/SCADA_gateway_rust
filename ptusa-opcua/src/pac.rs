@@ -28,17 +28,55 @@ pub struct PacClient {
     op_timeout: Duration,
     conn: Mutex<Option<Conn>>,
     connected: AtomicBool,
+    /// Ожидаемое имя прошивки (`PAC_name` из handshake); `None` — не сверяется.
+    expected_name: Option<String>,
+    /// Имя, названное прошивкой при последнем подключении.
+    name: std::sync::Mutex<Option<String>>,
+}
+
+/// `PAC_name` из Lua-текста ответа на GET_INFO_ON_CONNECT (`PAC_name = "BN1-МСА1"; …`); `None`, если его нет.
+pub fn parse_pac_name(text: &str) -> Option<String> {
+    let rest = text.split("PAC_name").nth(1)?.trim_start().strip_prefix('=')?.trim_start().strip_prefix('"')?;
+    let mut name = String::new();
+    let mut chars = rest.chars();
+    loop {
+        match chars.next()? {
+            '"' => return Some(name),
+            '\\' => name.push(chars.next()?),
+            c => name.push(c),
+        }
+    }
 }
 
 impl PacClient {
     /// Клиент без соединения.
     pub fn new(host: &str, port: u16, op_timeout: Duration) -> Self {
-        PacClient { host: host.into(), port, op_timeout, conn: Mutex::new(None), connected: AtomicBool::new(false) }
+        PacClient {
+            host: host.into(),
+            port,
+            op_timeout,
+            conn: Mutex::new(None),
+            connected: AtomicBool::new(false),
+            expected_name: None,
+            name: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Сверять имя прошивки (`PAC_name`) при каждом подключении: другое имя — отказ, соединение не открывается и значения
+    /// чужой прошивки наружу не отдаются.
+    pub fn expecting_name(mut self, name: Option<String>) -> Self {
+        self.expected_name = name.filter(|n| !n.trim().is_empty());
+        self
+    }
+
+    /// Имя, которым прошивка назвала себя при последнем подключении.
+    pub fn pac_name(&self) -> Option<String> {
+        self.name.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     /// Новый клиент той же прошивки со своим соединением (для команд записи: см. `server::add_write_callbacks`).
     pub fn sibling(&self) -> PacClient {
-        PacClient::new(&self.host, self.port, self.op_timeout)
+        PacClient::new(&self.host, self.port, self.op_timeout).expecting_name(self.expected_name.clone())
     }
 
     /// Есть ли соединение (читается без блокировки).
@@ -60,7 +98,18 @@ impl PacClient {
         if banner != BANNER {
             bail!("PAC: нет приветствия 'PAC accept', пришло {:?}", String::from_utf8_lossy(&banner));
         }
-        self.request(&mut conn, CMD_GET_INFO_ON_CONNECT, &[]).await?;
+        let info = self.request(&mut conn, CMD_GET_INFO_ON_CONNECT, &[]).await?;
+        let name = parse_pac_name(&lua_text(&info));
+        *self.name.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = name.clone();
+        if let Some(expected) = &self.expected_name
+            && name.as_deref().map(str::trim) != Some(expected.trim())
+        {
+            // Соединение не сохраняется: чужая прошивка не опрашивается и команды в неё не идут.
+            bail!(
+                "PAC {host}:{port}: не та прошивка — ожидали PAC_name {expected:?}, она назвала {:?}",
+                name.as_deref().unwrap_or("")
+            );
+        }
         *self.conn.lock().await = Some(conn);
         self.connected.store(true, Ordering::Release);
         Ok(())
@@ -119,5 +168,20 @@ impl PacClient {
         } else {
             inflate(&body).context("PAC: ошибка zlib-распаковки ответа")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pac_name_is_taken_from_the_handshake_text() {
+        let info = "protocol_version = 104; PAC_name = \"BN1-МСА1\"; is_reset_params = 0;params_CRC=32634;\n";
+        assert_eq!(parse_pac_name(info).as_deref(), Some("BN1-МСА1"));
+        assert_eq!(parse_pac_name(r#"PAC_name="a \"b\" \\ c""#).as_deref(), Some(r#"a "b" \ c"#));
+        assert_eq!(parse_pac_name("protocol_version = 104;"), None);
+        assert_eq!(parse_pac_name("PAC_name = 5;"), None, "не строка — имени нет");
+        assert_eq!(parse_pac_name("PAC_name = \"без конца"), None);
     }
 }

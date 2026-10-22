@@ -11,7 +11,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::app::App;
+use crate::app::{App, IdentityState};
 use crate::db::{self, EventFilter};
 
 /// Маршруты: `/actuator/*` открыты, `/api/*` — под токеном (если он задан).
@@ -122,7 +122,7 @@ async fn status(State(app): State<Arc<App>>) -> Json<Value> {
         .map(|c| {
             let mut status = json!({"id": c.ctrl.id.get(), "name": c.ctrl.name, "endpoint": c.ctrl.endpoint,
                         "protocol": format!("{:?}", c.ctrl.kind), "connected": c.is_connected(),
-                        "tags": c.ctrl.tags.len()});
+                        "tags": c.ctrl.tags.len(), "identity": identity_json(&c.identity_state())});
             // Проверка узлов OPC UA при последнем подключении: неизвестные узлы, типы, предел запроса.
             if let Some(report) = c.node_report() {
                 status["opcua"] = report.summary(50);
@@ -137,6 +137,16 @@ async fn status(State(app): State<Arc<App>>) -> Json<Value> {
         "uptimeSeconds": app.started.elapsed().as_secs(),
         "controllers": controllers,
     }))
+}
+
+/// Итог сверки имени контроллера для `/api/status`: `NOT_CONFIGURED`, `PENDING`, `VERIFIED` или `MISMATCH` с причиной.
+fn identity_json(state: &IdentityState) -> Value {
+    match state {
+        IdentityState::NotConfigured => json!({"status": "NOT_CONFIGURED"}),
+        IdentityState::Pending => json!({"status": "PENDING"}),
+        IdentityState::Verified => json!({"status": "VERIFIED"}),
+        IdentityState::Mismatch(reason) => json!({"status": "MISMATCH", "reason": reason}),
+    }
 }
 
 /// Роль экземпляра в паре горячего резерва.

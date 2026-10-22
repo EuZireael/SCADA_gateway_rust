@@ -15,6 +15,7 @@ pub mod events;
 pub mod filter;
 pub mod ha;
 pub mod http;
+pub mod identity;
 pub mod kafka;
 pub mod leadership;
 pub mod messages;

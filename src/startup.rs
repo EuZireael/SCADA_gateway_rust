@@ -283,6 +283,19 @@ pub fn spawn_telemetry_writer(
 
 /// Опрос каждого контроллера, журнал состояния и heartbeat — всё под надзором.
 pub fn spawn_pollers(app: &Arc<App>, tasks: &mut Tasks) {
+    let unchecked: Vec<&str> = app
+        .controllers
+        .iter()
+        .filter(|h| h.ctrl.identity.is_none() && h.ctrl.kind != crate::model::ControllerKind::Modbus)
+        .map(|h| h.ctrl.name.as_str())
+        .collect();
+    if !unchecked.is_empty() {
+        warn!(
+            "Имя контроллера не проверяется (нет identity в controllers.yaml): {} — перепутанный адрес или замена ПЛК \
+             не будут замечены, команды уйдут не туда",
+            unchecked.join(", ")
+        );
+    }
     for handle in &app.controllers {
         let (app, handle, cancel) = (app.clone(), handle.clone(), tasks.cancel.clone());
         let name = format!("опрос {}", handle.ctrl.name);

@@ -26,6 +26,10 @@ pub const NAMESPACE_URI: &str = "urn:savushkin:ptusa";
 /// Как часто писать в журнал сводку (снимки, команды, каналы без значения).
 const REPORT_EVERY: Duration = Duration::from_secs(60);
 
+/// Узел с именем прошивки (`PAC_name`) и узел «есть связь с прошивкой» (`ns=2;s=…`).
+pub const SYSTEM_PAC_NAME: &str = "SYSTEM.PAC_NAME";
+/// См. [`SYSTEM_PAC_NAME`].
+pub const SYSTEM_LINK_OK: &str = "SYSTEM.LINK_OK";
 /// Счётчики работы фасада для сводки в журнале.
 #[derive(Default)]
 pub struct Stats {
@@ -75,6 +79,36 @@ impl Pusher {
             let _ = self
                 .manager
                 .set_values(self.handle.subscriptions(), batch.iter().map(|(id, dv)| (id, None, dv.clone())));
+        });
+    }
+
+    /// Узлы `SYSTEM.PAC_NAME` (имя, которым прошивка назвала себя) и `SYSTEM.LINK_OK` (есть ли связь с прошивкой): по ним
+    /// шлюз убеждается, что подключился к нужной станции, и видит связь с прошивкой, а не «все узлы BAD».
+    pub fn push_system(&self, name: Option<&str>, link_ok: bool) {
+        let ts = DateTime::now();
+        let name_value = match name {
+            Some(n) => DataValue {
+                value: Some(Variant::from(n)),
+                status: Some(StatusCode::Good),
+                source_timestamp: Some(ts),
+                server_timestamp: Some(ts),
+                ..Default::default()
+            },
+            None => bad_value(StatusCode::BadNoData, ts),
+        };
+        let link = DataValue {
+            value: Some(Variant::Boolean(link_ok)),
+            status: Some(StatusCode::Good),
+            source_timestamp: Some(ts),
+            server_timestamp: Some(ts),
+            ..Default::default()
+        };
+        let (name_id, link_id) = (NodeId::new(self.ns, SYSTEM_PAC_NAME), NodeId::new(self.ns, SYSTEM_LINK_OK));
+        tokio::task::block_in_place(|| {
+            let _ = self.manager.set_values(
+                self.handle.subscriptions(),
+                [(&name_id, None, name_value), (&link_id, None, link)].into_iter(),
+            );
         });
     }
 
@@ -203,6 +237,20 @@ fn populate(manager: &SimpleNodeManager, ns: u16, channels: &[Channel]) -> usize
     let mut space = manager.address_space().write();
     let root = NodeId::new(ns, "PAC");
     ObjectBuilder::new(&root, "PAC", "PAC").organized_by(NodeId::from(ObjectId::ObjectsFolder)).insert(&mut *space);
+    // Прибор прошивки `SYSTEM` (поле `UP_TIME`…) и служебные узлы фасада — один объект: у них один идентификатор узла.
+    let system = NodeId::new(ns, "SYSTEM");
+    ObjectBuilder::new(&system, "SYSTEM", "SYSTEM").organized_by(root.clone()).insert(&mut *space);
+    devices.insert("SYSTEM", system.clone());
+    VariableBuilder::new(&NodeId::new(ns, SYSTEM_PAC_NAME), "PAC_NAME", "PAC_NAME")
+        .data_type(DataTypeId::String)
+        .value(Variant::from(""))
+        .organized_by(system.clone())
+        .insert(&mut *space);
+    VariableBuilder::new(&NodeId::new(ns, SYSTEM_LINK_OK), "LINK_OK", "LINK_OK")
+        .data_type(DataTypeId::Boolean)
+        .value(Variant::Boolean(false))
+        .organized_by(system)
+        .insert(&mut *space);
     for ch in channels {
         let parent = devices
             .entry(ch.device.as_str())
@@ -305,6 +353,7 @@ pub fn build(
     add_write_callbacks(&manager, ns, channels, &pac, &stats);
     let pusher = Pusher { handle, manager, ns };
     pusher.push_all_bad(channels, StatusCode::BadWaitingForInitialData);
+    pusher.push_system(None, false);
     info!(
         "адресное пространство: {} каналов ({} на запись), {devices} объектов",
         channels.len(),
@@ -349,7 +398,13 @@ impl Bridge {
             let step = async {
                 if !self.pac.connected() {
                     self.pac.connect().await?;
-                    info!("🟢 связь с прошивкой {}:{}", self.pac.host, self.pac.port);
+                    info!(
+                        "🟢 связь с прошивкой {}:{} (PAC_name {:?})",
+                        self.pac.host,
+                        self.pac.port,
+                        self.pac.pac_name().unwrap_or_default()
+                    );
+                    self.pusher.push_system(self.pac.pac_name().as_deref(), true);
                     backoff = Duration::from_secs(1);
                 }
                 self.poll_once().await
@@ -374,6 +429,8 @@ impl Bridge {
                         warn!("🔴 нет связи с прошивкой {}:{}: {e:#}", self.pac.host, self.pac.port);
                     }
                     self.pusher.push_all_bad(&self.channels, StatusCode::BadCommunicationError);
+                    // Имя — то, что назвала прошивка (чужая тоже): по нему видно, к чему подключились; связи нет.
+                    self.pusher.push_system(self.pac.pac_name().as_deref(), false);
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(Duration::from_secs(10));
                 }

@@ -161,7 +161,7 @@ push/PR и раз в неделю. Исключения (с обосновани
 
 `app.events.emit(Event::new("ТИП", "Источник", "INFO|WARNING|ERROR|CRITICAL", "сообщение").details(json!({…})))`. Событие
 попадёт в `event_log`, в Kafka `scada-events` (если экземпляр активный) и в REST. Типы сейчас: `CONNECTION`,
-`QUALITY_CHANGE`, `COMMAND`, `ALARM`, `ALARM_CLEARED`, `HEARTBEAT`, `SCRIPT`, `SYSTEM`, `HA`, `CONFIG`.
+`QUALITY_CHANGE`, `COMMAND`, `ALARM`, `ALARM_CLEARED`, `HEARTBEAT`, `SCRIPT`, `SYSTEM`, `HA`, `CONFIG`, `CONTROLLER_IDENTITY_MISMATCH`.
 
 ### …метрику
 

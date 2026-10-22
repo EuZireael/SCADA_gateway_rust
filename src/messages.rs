@@ -51,7 +51,7 @@ pub struct EventMessage {
     /// Константа `"EVENT"` — тип сообщения для потребителя.
     #[serde(rename = "type")]
     pub kind: &'static str,
-    /// Тип события: `CONNECTION`, `COMMAND`, `HEARTBEAT`, `HA`, `SCRIPT`, `SYSTEM`, `ALARM`…
+    /// Тип события: `CONNECTION`, `COMMAND`, `HEARTBEAT`, `HA`, `SCRIPT`, `SYSTEM`, `ALARM`, `CONTROLLER_IDENTITY_MISMATCH`…
     pub event_type: String,
     /// Источник: `Gateway`, `CommandConsumer`, `HotStandby`, `Scripts`.
     pub source: String,

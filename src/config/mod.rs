@@ -580,6 +580,37 @@ mod tests {
     }
 
     #[test]
+    fn identity_is_parsed_and_checked_against_the_protocol() {
+        let yaml = |endpoint: &str, identity: &str| {
+            format!(
+                "opcua:\n  servers:\n    - {{name: C, endpoint: \"{endpoint}\", enabled: true, {identity}, tags: []}}\n"
+            )
+        };
+        let ok = parse_controllers(&yaml("pac://h:10000", "identity: {pacName: \"BN1-МСА1\"}")).unwrap();
+        assert_eq!(ok[0].identity.as_ref().and_then(|i| i.pac_name.as_deref()), Some("BN1-МСА1"));
+        let node = "identity: {pacName: X, nodeId: \"ns=2;s=SYSTEM.PAC_NAME\"}";
+        assert!(parse_controllers(&yaml("opc.tcp://h:4840", node)).is_ok());
+        assert!(parse_controllers(&yaml("opc.tcp://h:4840", "identity: {applicationUri: \"urn:x\"}")).is_ok());
+        // Без identity контроллер работает как прежде.
+        assert!(parse_controllers(&yaml("opc.tcp://h:4840", "security: None")).unwrap()[0].identity.is_none());
+        // Правило, которое не сверяет ничего или не подходит протоколу, — ошибка: иначе оператор считал бы, что сверка идёт.
+        for (endpoint, identity, part) in [
+            ("modbus://h:502", "identity: {pacName: X}", "Modbus"),
+            ("pac://h:10000", "identity: {}", "identity пуст"),
+            ("pac://h:10000", "identity: {pacName: X, nodeId: \"ns=2;s=1\"}", "только identity.pacName"),
+            ("pac://h:10000", "identity: {applicationUri: \"urn:x\"}", "только identity.pacName"),
+            ("opc.tcp://h:4840", "identity: {pacName: X}", "вместе"),
+            ("opc.tcp://h:4840", "identity: {nodeId: \"ns=2;s=1\"}", "вместе"),
+            ("opc.tcp://h:4840", "identity: {}", "identity пуст"),
+            ("opc.tcp://h:4840", "identity: {pacName: \" \"}", "identity.pacName пуст"),
+            ("opc.tcp://h:4840", "identity: {pacNme: X}", "pacNme"),
+        ] {
+            let err = parse_controllers(&yaml(endpoint, identity)).unwrap_err();
+            assert!(format!("{err:#}").contains(part), "{endpoint} {identity}: {err:#}");
+        }
+    }
+
+    #[test]
     fn tag_history_override_is_parsed() {
         let yaml = r#"
 opcua:
