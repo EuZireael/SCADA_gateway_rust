@@ -189,7 +189,9 @@ impl KafkaOut {
             .set("acks", "all")
             .set("compression.type", "snappy")
             .set("linger.ms", "5")
-            .set("batch.size", "32768")
+            // Пачка до 1 МБ (до сжатия; предел librdkafka — message.max.bytes). При 32 КБ в запросе ~200 сообщений,
+            // а запросы к партиции идут по одному: на Windows ответ ~45 мс — потолок ~5 тыс./с на топик.
+            .set("batch.size", "1000000")
             // Недоставленное за 30 с считается ошибкой: свежий цикл опроса пришлёт новое значение.
             .set("message.timeout.ms", "30000")
             .create_with_context(DeliveryCounter { metrics: metrics.clone(), state: delivery.clone() })
