@@ -32,6 +32,8 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::{info, warn};
 
+use crate::config::IdentityConfig;
+use crate::identity;
 use crate::model::{self, OpcMode, OpcPolicy, OpcSecurity, Quality, Tag, TagValue, Timestamp};
 use crate::opcua_cert::{self, CertSettings};
 
@@ -552,6 +554,26 @@ impl OpcConnection {
             .context("таймаут записи")?
             .map_err(|e| anyhow!("{e}"))?;
         statuses.into_iter().next().context("сервер не вернул статус записи")
+    }
+
+    /// Сверить контроллер с ожидаемым (`identity` в `controllers.yaml`): `ApplicationUri` сервера (первый элемент
+    /// `Server.ServerArray`) и/или значение узла с именем контроллера. Несовпадение, непрочитанный узел — [`identity::Mismatch`];
+    /// узел `nsu=` разбирается по таблице пространств имён, поэтому вызывать после [`Self::prepare`].
+    pub async fn verify_identity(&self, identity: &IdentityConfig) -> Result<()> {
+        if let Some(expected) = &identity.application_uri {
+            let read = self.read(&[ReadValueId::from(NodeId::from(VariableId::Server_ServerArray))]).await?;
+            let uri =
+                if read[0].status().is_good() { string_array(read[0].value.as_ref()).into_iter().next() } else { None };
+            identity::check("ApplicationUri сервера", expected, uri.as_deref())?;
+        }
+        if let (Some(node), Some(expected)) = (&identity.node_id, &identity.pac_name) {
+            let id = resolve_node_id(node, &self.namespaces)?;
+            let read = self.read(&[ReadValueId::from(id)]).await?;
+            let (value, quality, _) = reading(&read[0]);
+            let name = value.filter(|_| quality == Quality::Good).map(|v| v.to_string());
+            identity::check(&format!("узел {node}"), expected, name.as_deref())?;
+        }
+        Ok(())
     }
 
     /// Закрыть сессию (с таймаутом) и остановить её цикл событий. Если цикл событий уже завершился (сервер пропал,

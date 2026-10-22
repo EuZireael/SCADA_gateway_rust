@@ -57,6 +57,14 @@ impl PacLua {
         }
     }
 
+    /// `PAC_name` из ответа GET_INFO_ON_CONNECT — имя, которым PAC называет себя; `None`, если не задано или не строка.
+    pub fn pac_name(&self) -> Option<String> {
+        match self.lua.globals().get::<Value>("PAC_name") {
+            Ok(Value::String(s)) => Some(s.to_string_lossy()),
+            _ => None,
+        }
+    }
+
     /// Значение поля прибора из снимка `t`, приведённое к типу тега. `None` — нет снимка,
     /// прибора, поля, элемента массива или значение не приводится к типу.
     ///
@@ -356,6 +364,11 @@ mod tests {
         let l = PacLua::new().unwrap();
         l.exec("protocol_version = 104; PAC_name = \"BN1-МСА1\"; is_reset_params = 0;params_CRC=32634;").unwrap();
         assert_eq!(l.protocol_version(), 104);
+        assert_eq!(l.pac_name().as_deref(), Some("BN1-МСА1"));
+        assert_eq!(PacLua::new().unwrap().pac_name(), None, "до handshake имени нет");
+        let l = PacLua::new().unwrap();
+        l.exec("PAC_name = 5").unwrap();
+        assert_eq!(l.pac_name(), None, "не строка — имени нет");
     }
 
     #[test]

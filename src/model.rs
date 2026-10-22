@@ -316,6 +316,8 @@ pub struct Controller {
     pub opc_security: OpcSecurity,
     /// Опрос или подписки (только OPC UA).
     pub acquisition: Acquisition,
+    /// Как опознать контроллер при подключении; `None` — имя не сверяется.
+    pub identity: Option<crate::config::IdentityConfig>,
 }
 
 impl Controller {
@@ -329,6 +331,7 @@ impl Controller {
             enabled: cfg.enabled,
             opc_security: cfg.opc_security().unwrap_or_default(),
             acquisition: Acquisition::parse(cfg.acquisition.as_deref()).unwrap_or_default(),
+            identity: cfg.identity.clone(),
             tags: cfg
                 .tags
                 .iter()
@@ -593,6 +596,7 @@ mod tests {
             username: None,
             password: None,
             enabled: true,
+            identity: None,
             tags: vec![t.clone()],
         };
         assert_eq!(Controller::from_config(&s).unwrap().cycle_period_ms(), 2000);

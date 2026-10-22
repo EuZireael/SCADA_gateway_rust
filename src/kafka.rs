@@ -179,21 +179,28 @@ impl WarnThrottle {
 }
 
 impl KafkaOut {
+    /// Свойства продюсера: значения по умолчанию, которые `KAFKA_CLIENT_*` перекрывает (`client.id`, `acks`, `compression.type`,
+    /// `linger.ms`, `batch.size`, `message.timeout.ms`), и `enable.idempotence`, который он не перекрывает.
+    fn producer_config(settings: &KafkaSettings) -> rdkafka::ClientConfig {
+        let mut config = settings.client_config_with(&[
+            ("client.id", "scada-gateway-rs"),
+            ("acks", "all"),
+            ("compression.type", "snappy"),
+            ("linger.ms", "5"),
+            // Пачка до 1 МБ (до сжатия; предел librdkafka — message.max.bytes). При 32 КБ в запросе ~200 сообщений,
+            // а запросы к партиции идут по одному: на Windows ответ ~45 мс — потолок ~5 тыс./с на топик.
+            ("batch.size", "1000000"),
+            // Недоставленное за 30 с считается ошибкой: свежий цикл опроса пришлёт новое значение.
+            ("message.timeout.ms", "30000"),
+        ]);
+        config.set("enable.idempotence", "true");
+        config
+    }
+
     /// Создать продюсера (идемпотентность, `acks=all`, snappy, пачки по 5 мс); неверное свойство безопасности — ошибка.
     pub fn new(settings: &KafkaSettings, metrics: Arc<Metrics>, leadership: Arc<Leadership>) -> Result<Self> {
         let delivery = Arc::new(DeliveryState::default());
-        let producer: ThreadedProducer<DeliveryCounter> = settings
-            .client_config()
-            .set("client.id", "scada-gateway-rs")
-            .set("enable.idempotence", "true")
-            .set("acks", "all")
-            .set("compression.type", "snappy")
-            .set("linger.ms", "5")
-            // Пачка до 1 МБ (до сжатия; предел librdkafka — message.max.bytes). При 32 КБ в запросе ~200 сообщений,
-            // а запросы к партиции идут по одному: на Windows ответ ~45 мс — потолок ~5 тыс./с на топик.
-            .set("batch.size", "1000000")
-            // Недоставленное за 30 с считается ошибкой: свежий цикл опроса пришлёт новое значение.
-            .set("message.timeout.ms", "30000")
+        let producer: ThreadedProducer<DeliveryCounter> = Self::producer_config(settings)
             .create_with_context(DeliveryCounter { metrics: metrics.clone(), state: delivery.clone() })
             .context("не создан Kafka-продюсер")?;
         Ok(KafkaOut {
@@ -517,6 +524,34 @@ mod tests {
     fn producer(s: &KafkaSettings) -> Result<KafkaOut> {
         let metrics = Arc::new(Metrics::new());
         KafkaOut::new(s, metrics.clone(), Leadership::single("test".into(), metrics.ha_gauge("test")))
+    }
+
+    /// Свойства из `KAFKA_CLIENT_*` перекрывают значения продюсера по умолчанию; идемпотентность они не отключают.
+    #[test]
+    fn client_properties_override_producer_defaults_but_not_idempotence() {
+        let defaults = KafkaOut::producer_config(&settings_with(&[]));
+        assert_eq!(defaults.get("batch.size"), Some("1000000"));
+        assert_eq!(defaults.get("linger.ms"), Some("5"));
+        assert_eq!(defaults.get("acks"), Some("all"));
+        assert_eq!(defaults.get("client.id"), Some("scada-gateway-rs"));
+        assert_eq!(defaults.get("enable.idempotence"), Some("true"));
+
+        let tuned = KafkaOut::producer_config(&settings_with(&[
+            ("batch.size", "250000"),
+            ("linger.ms", "20"),
+            ("compression.type", "lz4"),
+            ("message.timeout.ms", "60000"),
+            ("client.id", "gw-station-2"),
+            ("enable.idempotence", "false"),
+        ]));
+        assert_eq!(tuned.get("batch.size"), Some("250000"));
+        assert_eq!(tuned.get("linger.ms"), Some("20"));
+        assert_eq!(tuned.get("compression.type"), Some("lz4"));
+        assert_eq!(tuned.get("message.timeout.ms"), Some("60000"));
+        assert_eq!(tuned.get("client.id"), Some("gw-station-2"));
+        assert_eq!(tuned.get("enable.idempotence"), Some("true"), "идемпотентность задаёт шлюз");
+        assert_eq!(tuned.get("acks"), Some("all"), "то, что не перекрыто, остаётся по умолчанию");
+        assert!(producer(&settings_with(&[("batch.size", "250000"), ("linger.ms", "20")])).is_ok());
     }
 
     /// librdkafka собран с OpenSSL и SASL: клиенты с TLS и SCRAM/PLAIN создаются (подключения нет).

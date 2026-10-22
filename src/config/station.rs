@@ -40,9 +40,62 @@ pub struct ServerConfig {
     /// Включён ли контроллер; по умолчанию `false` — выключенный не опрашивается и не проверяется.
     #[serde(default)]
     pub enabled: bool,
+    /// Чем контроллер называет себя; сверяется при каждом подключении (см. [`IdentityConfig`]).
+    pub identity: Option<IdentityConfig>,
     /// Теги контроллера.
     #[serde(default)]
     pub tags: Vec<TagConfig>,
+}
+
+/// Как опознать контроллер при подключении: имя, которое он называет сам. Не совпало — шлюз закрывает соединение, теги
+/// идут с качеством `BAD`, команды в этот контроллер не уходят.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IdentityConfig {
+    /// PAC: `PAC_name` из ответа на `GET_INFO_ON_CONNECT`. OPC UA: ожидаемое значение узла `nodeId` (у фасада ptusa-opcua
+    /// и симулятора — `SYSTEM.PAC_NAME`).
+    pub pac_name: Option<String>,
+    /// OPC UA: узел, значение которого — имя контроллера (с `pacName`). Адрес `ns=2;s=…` или `nsu=<URI>;s=…`.
+    pub node_id: Option<String>,
+    /// OPC UA: `ApplicationUri` сервера (первый элемент `Server.ServerArray`).
+    pub application_uri: Option<String>,
+}
+
+impl IdentityConfig {
+    /// Проверка при старте: пустое или неподходящее протоколу правило — ошибка (иначе оператор считал бы, что сверка идёт).
+    fn validate(&self, name: &str, endpoint: &str) -> Result<()> {
+        let fields =
+            [("pacName", &self.pac_name), ("nodeId", &self.node_id), ("applicationUri", &self.application_uri)];
+        for (field, value) in fields {
+            if value.as_deref().is_some_and(|v| v.trim().is_empty()) {
+                bail!("контроллер {name:?}: identity.{field} пуст — задайте значение или уберите поле");
+            }
+        }
+        if endpoint.starts_with("opc.tcp://") {
+            if self.pac_name.is_some() != self.node_id.is_some() {
+                bail!(
+                    "контроллер {name:?}: identity.pacName и identity.nodeId для OPC UA задаются вместе (узел и его ожидаемое значение)"
+                );
+            }
+            if self.pac_name.is_none() && self.application_uri.is_none() {
+                bail!("контроллер {name:?}: identity пуст — задайте pacName с nodeId или applicationUri");
+            }
+        } else if endpoint.starts_with("pac://") {
+            if self.node_id.is_some() || self.application_uri.is_some() {
+                bail!(
+                    "контроллер {name:?}: у PAC сверяется только identity.pacName (nodeId и applicationUri — для OPC UA)"
+                );
+            }
+            if self.pac_name.is_none() {
+                bail!("контроллер {name:?}: identity пуст — задайте pacName");
+            }
+        } else {
+            bail!(
+                "контроллер {name:?}: identity поддерживается для PAC и OPC UA (endpoint {endpoint}); у Modbus прибор себя не называет"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl ServerConfig {
@@ -73,6 +126,9 @@ impl ServerConfig {
                 self.name,
                 self.endpoint
             );
+        }
+        if let Some(identity) = &self.identity {
+            identity.validate(&self.name, &self.endpoint)?;
         }
         Ok(())
     }

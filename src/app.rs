@@ -7,10 +7,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use sqlx::PgPool;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::Settings;
 use crate::events::{Event, EventSink, TelemetrySink};
+use crate::identity::Mismatch;
 use crate::kafka::KafkaOut;
 use crate::leadership::Leadership;
 use crate::metrics::Metrics;
@@ -26,6 +27,19 @@ const LINK_UP: u8 = 1;
 /// Связь потеряна.
 const LINK_DOWN: u8 = 2;
 
+/// Итог сверки имени контроллера (`identity` в `controllers.yaml`) при последнем подключении.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityState {
+    /// `identity` не задан: контроллер не опознаётся.
+    NotConfigured,
+    /// Задан, но подключения ещё не было.
+    Pending,
+    /// Контроллер назвал ожидаемое имя.
+    Verified,
+    /// Назвал другое (текст — что ожидали и что получили): соединение закрыто, команды в него не уходят.
+    Mismatch(String),
+}
+
 /// Контроллер + живое состояние связи + соединение для записи команд.
 pub struct ControllerHandle {
     /// Контроллер и его теги (неизменяемая конфигурация).
@@ -40,6 +54,10 @@ pub struct ControllerHandle {
     pub opc: Mutex<Option<Arc<OpcConnection>>>,
     /// Итог проверки узлов OPC UA при последнем подключении (для `/api/status`).
     node_report: Mutex<Option<NodeReport>>,
+    /// Итог последней сверки имени контроллера.
+    identity: Mutex<IdentityState>,
+    /// Не чаще раза в минуту — событие и запись в журнал о чужом контроллере (повторы идут каждую попытку).
+    identity_alarm: crate::events::Throttle,
     /// Соединение PAC: команда идёт по тому же каналу, что и опрос (как у драйвера).
     pub pac: tokio::sync::Mutex<Option<PacConnection>>,
     /// «Опроси сейчас» после удачной записи (см. GatewaySettings::poll_after_write). Notify хранит
@@ -50,6 +68,7 @@ pub struct ControllerHandle {
 impl ControllerHandle {
     /// Обработчик контроллера: связь «неизвестна», серия ошибок нулевая.
     pub fn new(ctrl: Controller) -> Self {
+        let ctrl_has_identity = ctrl.identity.is_some();
         ControllerHandle {
             ctrl,
             link: AtomicU8::new(LINK_UNKNOWN),
@@ -57,6 +76,8 @@ impl ControllerHandle {
             error_streak: AtomicU32::new(0),
             opc: Mutex::new(None),
             node_report: Mutex::new(None),
+            identity: Mutex::new(if ctrl_has_identity { IdentityState::Pending } else { IdentityState::NotConfigured }),
+            identity_alarm: crate::events::Throttle::new(Duration::from_secs(60)),
             pac: tokio::sync::Mutex::new(None),
             poll_now: tokio::sync::Notify::new(),
         }
@@ -103,6 +124,11 @@ impl ControllerHandle {
     /// Запомнить новую сессию или `None` после её закрытия.
     pub fn set_opc_connection(&self, conn: Option<Arc<OpcConnection>>) {
         *self.opc.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = conn;
+    }
+
+    /// Итог последней сверки имени контроллера.
+    pub fn identity_state(&self) -> IdentityState {
+        self.identity.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     /// Итог проверки узлов при последнем подключении по OPC UA.
@@ -284,6 +310,41 @@ impl App {
         }
     }
 
+    /// Контроллер назвал ожидаемое имя.
+    pub fn identity_verified(&self, h: &ControllerHandle) {
+        if h.ctrl.identity.is_some() {
+            *h.identity.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = IdentityState::Verified;
+        }
+    }
+
+    /// Контроллер назвал не то имя: соединение закрыто, теги — `BAD`, команды не уходят. Журнал и событие — не чаще раза в минуту.
+    pub fn identity_mismatch(&self, h: &ControllerHandle, mismatch: &Mismatch) {
+        let text = mismatch.to_string();
+        *h.identity.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = IdentityState::Mismatch(text.clone());
+        if h.identity_alarm.ready() {
+            error!(
+                "🚫 {}: подключились не к тому контроллеру — {text}; соединение закрыто, команды не отправляются",
+                h.ctrl.name
+            );
+            self.events.emit(
+                Event::new(
+                    "CONTROLLER_IDENTITY_MISMATCH",
+                    "Gateway",
+                    "ERROR",
+                    format!("{}: подключились не к тому контроллеру — {text}", h.ctrl.name),
+                )
+                .controller(h.ctrl.id.get())
+                .details(json!({
+                    "controller": h.ctrl.name,
+                    "endpoint": h.ctrl.endpoint,
+                    "check": mismatch.what,
+                    "expected": mismatch.expected,
+                    "actual": mismatch.actual,
+                })),
+            );
+        }
+    }
+
     /// Шлюз «слепой»: есть контроллеры, и связь потеряна со всеми (ни с одним нет данных).
     pub fn all_links_down(&self) -> bool {
         !self.controllers.is_empty() && self.controllers.iter().all(|c| c.is_down())
@@ -311,6 +372,7 @@ mod tests {
             tags: Vec::new(),
             opc_security: Default::default(),
             acquisition: Default::default(),
+            identity: None,
         })
     }
 

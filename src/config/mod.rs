@@ -61,7 +61,16 @@ pub struct KafkaSettings {
 impl KafkaSettings {
     /// Заготовка конфигурации клиента: брокеры и свойства безопасности. Остальное клиент задаёт сам.
     pub fn client_config(&self) -> rdkafka::ClientConfig {
+        self.client_config_with(&[])
+    }
+
+    /// То же со значениями по умолчанию, которые `KAFKA_CLIENT_*` перекрывает: они ставятся до пользовательских свойств.
+    /// Свойства, от которых зависит семантика (см. [`FIXED_CLIENT_PROPERTIES`]), вызывающий ставит после — поверх.
+    pub fn client_config_with(&self, defaults: &[(&str, &str)]) -> rdkafka::ClientConfig {
         let mut c = rdkafka::ClientConfig::new();
+        for (k, v) in defaults {
+            c.set(*k, *v);
+        }
         c.set("bootstrap.servers", &self.bootstrap_servers);
         for (k, v) in &self.client.0 {
             c.set(k, v);
@@ -75,7 +84,7 @@ mod db;
 mod env;
 mod station;
 
-pub use client_props::{ClientProperties, client_properties};
+pub use client_props::{ClientProperties, FIXED_CLIENT_PROPERTIES, client_properties};
 pub use db::{DbSettings, DbSsl, JdbcUrl, parse_jdbc_url};
 pub use env::Secret;
 use env::{api_token, default_instance_id, env_any, env_bool, env_ms, env_or, env_parse};
@@ -398,6 +407,19 @@ mod tests {
     }
 
     #[test]
+    fn properties_the_gateway_fixes_are_reported_as_ignored() {
+        let p = super::client_properties([
+            ("KAFKA_CLIENT_ENABLE_IDEMPOTENCE".to_string(), "false".to_string()),
+            ("KAFKA_CLIENT_BATCH_SIZE".to_string(), "250000".to_string()),
+            ("KAFKA_CLIENT_GROUP_ID".to_string(), "x".to_string()),
+        ]);
+        assert_eq!(p.ignored(), ["enable.idempotence", "group.id"]);
+        assert!(
+            super::client_properties([("KAFKA_CLIENT_BATCH_SIZE".to_string(), "1".to_string())]).ignored().is_empty()
+        );
+    }
+
+    #[test]
     fn kafka_client_properties_from_spring_jaas() {
         let p = super::client_properties([
             ("SPRING_KAFKA_PROPERTIES_SECURITY_PROTOCOL".to_string(), "SASL_PLAINTEXT".to_string()),
@@ -603,6 +625,37 @@ mod tests {
         // Выключенный контроллер с ошибкой не мешает запуску остальных.
         let disabled = "opcua:\n  servers:\n    - {name: D, endpoint: \"opc.tcp://h:4840\", enabled: false, security: Nonsense, tags: []}\n";
         assert!(parse_controllers(disabled).is_ok());
+    }
+
+    #[test]
+    fn identity_is_parsed_and_checked_against_the_protocol() {
+        let yaml = |endpoint: &str, identity: &str| {
+            format!(
+                "opcua:\n  servers:\n    - {{name: C, endpoint: \"{endpoint}\", enabled: true, {identity}, tags: []}}\n"
+            )
+        };
+        let ok = parse_controllers(&yaml("pac://h:10000", "identity: {pacName: \"BN1-МСА1\"}")).unwrap();
+        assert_eq!(ok[0].identity.as_ref().and_then(|i| i.pac_name.as_deref()), Some("BN1-МСА1"));
+        let node = "identity: {pacName: X, nodeId: \"ns=2;s=SYSTEM.PAC_NAME\"}";
+        assert!(parse_controllers(&yaml("opc.tcp://h:4840", node)).is_ok());
+        assert!(parse_controllers(&yaml("opc.tcp://h:4840", "identity: {applicationUri: \"urn:x\"}")).is_ok());
+        // Без identity контроллер работает как прежде.
+        assert!(parse_controllers(&yaml("opc.tcp://h:4840", "security: None")).unwrap()[0].identity.is_none());
+        // Правило, которое не сверяет ничего или не подходит протоколу, — ошибка: иначе оператор считал бы, что сверка идёт.
+        for (endpoint, identity, part) in [
+            ("modbus://h:502", "identity: {pacName: X}", "Modbus"),
+            ("pac://h:10000", "identity: {}", "identity пуст"),
+            ("pac://h:10000", "identity: {pacName: X, nodeId: \"ns=2;s=1\"}", "только identity.pacName"),
+            ("pac://h:10000", "identity: {applicationUri: \"urn:x\"}", "только identity.pacName"),
+            ("opc.tcp://h:4840", "identity: {pacName: X}", "вместе"),
+            ("opc.tcp://h:4840", "identity: {nodeId: \"ns=2;s=1\"}", "вместе"),
+            ("opc.tcp://h:4840", "identity: {}", "identity пуст"),
+            ("opc.tcp://h:4840", "identity: {pacName: \" \"}", "identity.pacName пуст"),
+            ("opc.tcp://h:4840", "identity: {pacNme: X}", "pacNme"),
+        ] {
+            let err = parse_controllers(&yaml(endpoint, identity)).unwrap_err();
+            assert!(format!("{err:#}").contains(part), "{endpoint} {identity}: {err:#}");
+        }
     }
 
     #[test]

@@ -1,10 +1,13 @@
 //! OPC UA-фасад эмулятора мойки (см. документацию библиотеки).
 //!
 //!   ptusa-opcua              запуск
-//!   ptusa-opcua healthcheck  проверка живости (порт OPC UA) для контейнера
+//!   ptusa-opcua healthcheck  проверка живости для контейнера: порт OPC UA открыт и прошивка отвечает (при PAC_NAME — своё имя)
 //!
 //! Окружение:
 //!   PAC_HOST, PAC_PORT   прошивка ptusa (driver-master), по умолчанию ptusa:10000
+//!   PAC_NAME             имя прошивки (`PAC_name`): задано — фасад не открывает соединение с прошивкой, назвавшей себя иначе,
+//!                        и значений чужой станции не отдаёт (узлы `BadCommunicationError`, `SYSTEM.LINK_OK` = false);
+//!                        не задано — имя не сверяется. Узел `SYSTEM.PAC_NAME` всегда отдаёт имя прошивки
 //!   STATION_CONFIG       конфигурация станции, по умолчанию /config/station.yaml
 //!   OPCUA_BIND           на чём слушать, по умолчанию 0.0.0.0:4840
 //!   OPCUA_ENDPOINT       адрес, который сервер называет в FindServers (по умолчанию opc.tcp://localhost:4840);
@@ -29,6 +32,13 @@ fn env(name: &str, default: &str) -> String {
     std::env::var(name).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
 }
 
+/// Клиент прошивки из `PAC_HOST`/`PAC_PORT`; с `PAC_NAME` — со сверкой её имени при подключении.
+fn pac_client() -> Result<PacClient> {
+    let port: u16 = env("PAC_PORT", "10000").parse().context("PAC_PORT")?;
+    let expected = Some(env("PAC_NAME", "")).filter(|n| !n.is_empty());
+    Ok(PacClient::new(&env("PAC_HOST", "ptusa"), port, Duration::from_secs(3)).expecting_name(expected))
+}
+
 /// Запуск фасада: каналы из конфигурации станции, клиент PAC, OPC UA-сервер и цикл снимков.
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -44,13 +54,15 @@ async fn main() -> Result<()> {
             .await
             .with_context(|| format!("порт {port}: таймаут"))?
             .with_context(|| format!("порт {port}"))?;
+        // Порт открыт, но фасад без прошивки бесполезен: проверяем и связь с ней (и её имя, если оно задано).
+        let pac = pac_client()?;
+        pac.connect().await?;
         return Ok(());
     }
 
     let channels = Arc::new(load_channels(&PathBuf::from(env("STATION_CONFIG", "/config/station.yaml")))?);
-    let pac_port: u16 = env("PAC_PORT", "10000").parse().context("PAC_PORT")?;
     let poll_ms: u64 = env("POLL_MS", "500").parse().context("POLL_MS")?;
-    let pac = Arc::new(PacClient::new(&env("PAC_HOST", "ptusa"), pac_port, Duration::from_secs(3)));
+    let pac = Arc::new(pac_client()?);
     let stats = Arc::new(Stats::default());
     let announce = env("OPCUA_ENDPOINT", "opc.tcp://localhost:4840");
     let (server, pusher) = build(&channels, pac.clone(), stats.clone(), &announce, bind.clone())?;

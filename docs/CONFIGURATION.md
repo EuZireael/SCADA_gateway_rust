@@ -71,8 +71,16 @@
 | `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` | — | учётные данные SASL |
 | `KAFKA_SSL_CA_LOCATION` | — | корневой сертификат брокера |
 | `KAFKA_SSL_CERTIFICATE_LOCATION`, `KAFKA_SSL_KEY_LOCATION`, `KAFKA_SSL_KEY_PASSWORD` | — | клиентский сертификат и ключ (mTLS) |
-| `KAFKA_CLIENT_<СВОЙСТВО>` | — | любое свойство librdkafka: `KAFKA_CLIENT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM=none` → `ssl.endpoint.identification.algorithm`; перекрывает именованные. Неизвестное свойство останавливает запуск |
+| `KAFKA_CLIENT_<СВОЙСТВО>` | — | любое свойство librdkafka: `KAFKA_CLIENT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM=none` → `ssl.endpoint.identification.algorithm`; перекрывает именованные и значения продюсера по умолчанию (`client.id`, `acks`, `compression.type`, `linger.ms`, `batch.size`, `message.timeout.ms`: `KAFKA_CLIENT_BATCH_SIZE=250000`). Неизвестное свойство останавливает запуск; свойства, которые шлюз задаёт сам (см. ниже), игнорируются с предупреждением |
 | `SPRING_KAFKA_PROPERTIES_SECURITY_PROTOCOL`, `…_SASL_MECHANISM`, `…_SASL_JAAS_CONFIG` | — | как у Java-шлюза; из JAAS берутся `username` и `password` |
+
+**Что `KAFKA_CLIENT_*` не перекрывает.** Идемпотентность продюсера (`enable.idempotence=true`: от неё порядок и отсутствие дублей при
+повторной отправке), а у консьюмеров команд, настроек тегов и выборов резерва — `group.id`, `enable.auto.commit`,
+`auto.offset.reset`, `allow.auto.create.topics`, `session.timeout.ms`, `heartbeat.interval.ms`, `max.poll.interval.ms` и
+`partition.assignment.strategy`: группа, позиции и состав группы выборов определяются настройками `GATEWAY_COMMANDS_GROUP_ID` и
+`GATEWAY_HA_*`. Заданное в окружении значение такого свойства не применяется, шлюз пишет об этом предупреждение при запуске. Другие
+значения по умолчанию перекрываются, но не все сочетания допустимы для librdkafka: например, `acks=1` вместе с идемпотентным
+продюсером он отвергнет, и шлюз не запустится — с понятной ошибкой.
 
 Пароли и ключи в журнал и `Debug` не попадают. Свойства безопасности применяются ко всем клиентам шлюза: продюсеру,
 консьюмеру команд, консьюмеру выборов и администратору топиков.
@@ -190,11 +198,48 @@ opcua:
 | `security` | — | только OPC UA. `None`; политика `Basic256Sha256`, `Aes128_Sha256_RsaOaep`, `Aes256_Sha256_RsaPss`, `Basic256`, `Basic128Rsa15`; к ней необязательный режим `_Sign` или `_SignAndEncrypt` (по умолчанию `SignAndEncrypt`). Регистр, `_`, `-` и пробелы не важны |
 | `acquisition` | `poll` | только OPC UA. `poll` — шлюз каждый цикл читает «созревшие» теги запросом Read; `subscription` — подписки (MonitoredItems), сервер сам присылает изменения — см. «OPC UA: подписки» |
 | `username`, `password` | — | только OPC UA, задаются **вместе**. На канале `None` идут открытым текстом (предупреждение) |
+| `identity` | — | как опознать контроллер при подключении, см. ниже. Только PAC и OPC UA |
 | `id` | — | не используется |
 | `tags` | — | список тегов |
 
 `security`/`username`/`password` у Modbus и PAC — ошибка запуска: защиты на уровне этих протоколов нет, и делать вид, что
 она есть, нельзя.
+
+#### Проверка, что подключились к нужному контроллеру (`identity`)
+
+Перепутанный адрес, заменённый ПЛК, переназначенный IP — и шлюз читал бы чужой контроллер и писал в него команды оператора.
+Поэтому контроллер можно «опознавать»: при каждом подключении шлюз сверяет имя, которым контроллер называет себя сам.
+
+```yaml
+- name: "Барановичи-1.BN1_MCA1"
+  endpoint: "pac://${PAC_HOST}:10000"
+  identity: {pacName: "BN1-МСА1"}                     # PAC: PAC_name из ответа GET_INFO_ON_CONNECT
+- name: "Барановичи-1.BN1_MCA1 (OPC UA)"
+  endpoint: "opc.tcp://${PLC_HOST}:4840"
+  identity: {pacName: "BN1-МСА1", nodeId: "ns=2;s=SYSTEM.PAC_NAME"}   # OPC UA: значение узла
+  # или: identity: {applicationUri: "urn:savushkin:ptusa-opcua"}      # ApplicationUri сервера
+```
+
+| Поле | Протокол | Что сверяется |
+|---|---|---|
+| `pacName` | PAC | `PAC_name` из handshake. У OPC UA — ожидаемое значение узла `nodeId` (задаются **вместе**) |
+| `nodeId` | OPC UA | узел, значение которого — имя контроллера. У OPC UA-фасада `ptusa-opcua` и симулятора — `ns=2;s=SYSTEM.PAC_NAME`; допустим и адрес `nsu=…` |
+| `applicationUri` | OPC UA | `ApplicationUri` сервера (первый элемент `Server.ServerArray`) |
+
+Имена сравниваются точно (пробелы по краям не в счёт). **Осторожно с кириллицей:** в `BN1-МСА1` буквы «М», «С», «А» — русские; латинские
+`MCA` выглядят так же, но имя не совпадёт. В сообщении о несовпадении оба имени показаны и в экранированном виде
+(`\u{41c}\u{421}\u{410}`), чтобы разница была видна.
+
+**Не совпало — что делает шлюз:** закрывает соединение, теги контроллера идут с качеством `BAD`, **ни одна команда в него не
+уходит** (`FAILED_*`), контроллер `DOWN`, в `/api/status` → `controllers[].identity` статус `MISMATCH` и причина, в журнале
+ошибка и событие `CONTROLLER_IDENTITY_MISMATCH` (не чаще раза в минуту на контроллер). Повтор — по обычному расписанию
+подключения: поправили адрес или конфигурацию — связь поднимается сама. Узел, который не удалось прочитать, считается
+несовпадением. Без `identity` шлюз работает как раньше и при запуске пишет один раз, каких контроллеров имя не проверяется
+(Modbus прибор себя не называет — сверки нет). Пустое поле, `identity` у Modbus, `pacName` без `nodeId` у OPC UA, `nodeId`/`applicationUri` у
+PAC — ошибка запуска.
+
+`tools/station_config.sh` с переменной `PAC_NAME` (или `-DpacName`) пишет `identity` в генерируемый файл станции. Имя
+контроллера — `PAC_name` его прошивки; его называет технолог.
 
 ### Тег
 
@@ -323,6 +368,7 @@ scripts:
 * имена контроллеров или включённых тегов повторяются или пусты;
 * схема `endpoint` неизвестна;
 * `security` не разбирается; `username` без `password` и наоборот; защита задана у Modbus или PAC;
+* `identity` пуст, не подходит протоколу контроллера (см. «Проверка, что подключились к нужному контроллеру»);
 * протокол тега не совпадает с протоколом контроллера;
 * `nodeId` повторяется в пределах контроллера;
 * у PAC-тега нет `deviceName`/`fieldName` или в них недопустимые символы;

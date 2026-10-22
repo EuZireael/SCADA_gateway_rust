@@ -171,6 +171,20 @@ fn populate(plc: &Plc, manager: &SimpleNodeManager, ns: u16) -> Populated {
         builder.insert(&mut *space);
         types.insert(tag.address.clone(), tag.data_type);
     }
+    // Как у фасада ptusa-opcua: имя контроллера и признак связи — по ним шлюз убеждается, что подключился к нужному ПЛК
+    // (`identity` в controllers.yaml).
+    let system = NodeId::new(ns, "SYSTEM");
+    ObjectBuilder::new(&system, "SYSTEM", "SYSTEM").organized_by(plc_node.clone()).insert(&mut *space);
+    VariableBuilder::new(&NodeId::new(ns, "SYSTEM.PAC_NAME"), "PAC_NAME", "PAC_NAME")
+        .data_type(DataTypeId::String)
+        .value(Variant::from(plc.name.as_str()))
+        .organized_by(system.clone())
+        .insert(&mut *space);
+    VariableBuilder::new(&NodeId::new(ns, "SYSTEM.LINK_OK"), "LINK_OK", "LINK_OK")
+        .data_type(DataTypeId::Boolean)
+        .value(Variant::Boolean(true))
+        .organized_by(system)
+        .insert(&mut *space);
     Populated { variables: types.len(), types, devices }
 }
 

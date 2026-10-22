@@ -67,6 +67,11 @@ impl PacConnection {
         self.lua.exec(&lua_text(&body[off..]))
     }
 
+    /// Имя, которым PAC назвал себя в handshake (`PAC_name`).
+    pub fn pac_name(&self) -> Option<String> {
+        self.lua.pac_name()
+    }
+
     /// Значение поля прибора из снимка `t[device][field]`.
     pub fn read_value(&self, device: &str, field: &str, data_type: &str) -> Option<TagValue> {
         self.lua.read(device, field, data_type)

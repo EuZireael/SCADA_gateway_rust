@@ -1,0 +1,117 @@
+{
+  "Folder": "Gateway",
+  "NodeList": [
+    {
+      "NodeId": "Gw.Boolean",
+      "Name": "Gw.Boolean",
+      "DataType": "Boolean",
+      "ValueRank": -1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "Boolean для проверки шлюза"
+    },
+    {
+      "NodeId": "Gw.SByte",
+      "Name": "Gw.SByte",
+      "DataType": "SByte",
+      "ValueRank": -1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "SByte для проверки шлюза"
+    },
+    {
+      "NodeId": "Gw.Byte",
+      "Name": "Gw.Byte",
+      "DataType": "Byte",
+      "ValueRank": -1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "Byte для проверки шлюза"
+    },
+    {
+      "NodeId": "Gw.Int16",
+      "Name": "Gw.Int16",
+      "DataType": "Int16",
+      "ValueRank": -1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "Int16 для проверки шлюза"
+    },
+    {
+      "NodeId": "Gw.UInt16",
+      "Name": "Gw.UInt16",
+      "DataType": "UInt16",
+      "ValueRank": -1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "UInt16 для проверки шлюза"
+    },
+    {
+      "NodeId": "Gw.Int32",
+      "Name": "Gw.Int32",
+      "DataType": "Int32",
+      "ValueRank": -1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "Int32 для проверки шлюза"
+    },
+    {
+      "NodeId": "Gw.UInt32",
+      "Name": "Gw.UInt32",
+      "DataType": "UInt32",
+      "ValueRank": -1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "UInt32 для проверки шлюза"
+    },
+    {
+      "NodeId": "Gw.Int64",
+      "Name": "Gw.Int64",
+      "DataType": "Int64",
+      "ValueRank": -1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "Int64 для проверки шлюза"
+    },
+    {
+      "NodeId": "Gw.UInt64",
+      "Name": "Gw.UInt64",
+      "DataType": "UInt64",
+      "ValueRank": -1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "UInt64 для проверки шлюза"
+    },
+    {
+      "NodeId": "Gw.Float",
+      "Name": "Gw.Float",
+      "DataType": "Float",
+      "ValueRank": -1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "Float для проверки шлюза"
+    },
+    {
+      "NodeId": "Gw.Double",
+      "Name": "Gw.Double",
+      "DataType": "Double",
+      "ValueRank": -1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "Double для проверки шлюза"
+    },
+    {
+      "NodeId": "Gw.String",
+      "Name": "Gw.String",
+      "DataType": "String",
+      "ValueRank": -1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "String для проверки шлюза"
+    },
+    {
+      "NodeId": "Gw.FloatArray",
+      "Name": "Gw.FloatArray",
+      "DataType": "Float",
+      "ValueRank": 1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "массив"
+    },
+    {
+      "NodeId": "Gw.Time",
+      "Name": "Gw.Time",
+      "DataType": "DateTime",
+      "ValueRank": -1,
+      "AccessLevel": "CurrentReadOrWrite",
+      "Description": "DateTime"
+    }
+  ]
+}

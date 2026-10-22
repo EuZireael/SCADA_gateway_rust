@@ -180,6 +180,13 @@ pub async fn build_kafka(
     if !settings.kafka.client.0.is_empty() {
         info!("🔐 Kafka: {}", settings.kafka.client.summary());
     }
+    let ignored = settings.kafka.client.ignored();
+    if !ignored.is_empty() {
+        warn!(
+            "KAFKA_CLIENT_*: {} шлюз задаёт сам, значение из окружения не применяется (docs/CONFIGURATION.md)",
+            ignored.join(", ")
+        );
+    }
     Ok(Some(Arc::new(KafkaOut::new(&settings.kafka, metrics.clone(), leadership.clone())?)))
 }
 
@@ -283,6 +290,19 @@ pub fn spawn_telemetry_writer(
 
 /// Опрос каждого контроллера, журнал состояния и heartbeat — всё под надзором.
 pub fn spawn_pollers(app: &Arc<App>, tasks: &mut Tasks) {
+    let unchecked: Vec<&str> = app
+        .controllers
+        .iter()
+        .filter(|h| h.ctrl.identity.is_none() && h.ctrl.kind != crate::model::ControllerKind::Modbus)
+        .map(|h| h.ctrl.name.as_str())
+        .collect();
+    if !unchecked.is_empty() {
+        warn!(
+            "Имя контроллера не проверяется (нет identity в controllers.yaml): {} — перепутанный адрес или замена ПЛК \
+             не будут замечены, команды уйдут не туда",
+            unchecked.join(", ")
+        );
+    }
     for handle in &app.controllers {
         let (app, handle, cancel) = (app.clone(), handle.clone(), tasks.cancel.clone());
         let name = format!("опрос {}", handle.ctrl.name);
