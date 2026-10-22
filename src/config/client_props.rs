@@ -11,7 +11,27 @@ impl std::fmt::Debug for ClientProperties {
     }
 }
 
+/// Свойства, которые шлюз задаёт сам и не отдаёт `KAFKA_CLIENT_*`: от них зависят порядок и однозначность доставки (идемпотентный
+/// продюсер), позиции коммитов и состав группы выборов резерва. Значение из окружения для них игнорируется — об этом
+/// предупреждение при запуске.
+pub const FIXED_CLIENT_PROPERTIES: &[&str] = &[
+    "enable.idempotence",
+    "group.id",
+    "enable.auto.commit",
+    "auto.offset.reset",
+    "allow.auto.create.topics",
+    "session.timeout.ms",
+    "heartbeat.interval.ms",
+    "max.poll.interval.ms",
+    "partition.assignment.strategy",
+];
+
 impl ClientProperties {
+    /// Заданные в окружении свойства из [`FIXED_CLIENT_PROPERTIES`] — шлюз их значения не применит.
+    pub fn ignored(&self) -> Vec<&str> {
+        self.0.iter().map(|(k, _)| k.as_str()).filter(|k| FIXED_CLIENT_PROPERTIES.contains(k)).collect()
+    }
+
     /// Сводка для журнала: свойства без секретов.
     pub fn summary(&self) -> String {
         self.0.iter().filter(|(k, _)| !is_secret(k)).map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")
