@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::{ClientContext, DefaultClientContext};
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
-use rdkafka::error::RDKafkaErrorCode;
+use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::{DeliveryResult, Message};
 use rdkafka::producer::{BaseRecord, Producer, ProducerContext, ThreadedProducer};
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::config::{KafkaSettings, Topics};
+use crate::events::Throttle;
 use crate::leadership::{Leadership, RoleChange};
 use crate::messages::{AlarmMessage, CommandMessage, CommandResultMessage, EventMessage, TelemetryMessage};
 use crate::metrics::Metrics;
@@ -431,6 +432,7 @@ async fn consume_while_active<F, Fut>(
     F: Fn(CommandMessage, Option<i64>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    let transient_warn = Throttle::new(Duration::from_secs(60));
     loop {
         let msg = tokio::select! {
             _ = cancel.cancelled() => return,
@@ -457,12 +459,37 @@ async fn consume_while_active<F, Fut>(
                     Err(e) => warn!("Команда не разобрана ({e}): {}", preview(payload)),
                 }
             }
+            // Сеть до брокера: librdkafka переподключается сама, назначенные партиции и позиция остаются. Пересоздание
+            // консьюмера тут лишь теряло бы время (а без сохранённой позиции — и команды, пришедшие в промежутке).
+            Err(e) if is_transient(&e) => {
+                if transient_warn.ready() {
+                    warn!(
+                        "Kafka: приём команд — {e}; librdkafka переподключается сама (повтор — не чаще раза в минуту)"
+                    );
+                }
+            }
             Err(e) => {
                 warn!("Kafka: приём команд прерван: {e}");
                 return;
             }
         }
     }
+}
+
+/// Ошибка приёма, после которой librdkafka восстанавливается сама: не удалось соединиться с одним из адресов брокера
+/// (выключенный брокер кластера, `localhost` в IPv6, где брокер не слушает), брокеры недоступны, таймаут запроса.
+fn is_transient(e: &KafkaError) -> bool {
+    matches!(
+        e,
+        KafkaError::MessageConsumption(
+            RDKafkaErrorCode::BrokerTransportFailure
+                | RDKafkaErrorCode::Resolve
+                | RDKafkaErrorCode::AllBrokersDown
+                | RDKafkaErrorCode::RequestTimedOut
+                | RDKafkaErrorCode::BrokerNotAvailable
+                | RDKafkaErrorCode::NetworkException
+        )
+    )
 }
 
 /// Начало чужого сообщения для журнала: в топик может прийти что угодно и сколько угодно.
@@ -476,7 +503,8 @@ fn preview(payload: &[u8]) -> String {
 }
 
 /// Консьюмер с ручным назначением всех партиций топика команд: с закоммиченной позиции группы `GATEWAY_COMMANDS_GROUP_ID`,
-/// а при первом запуске — с конца.
+/// а при первом запуске — с конца. Найденный конец сразу сохраняется в группе: следующий консьюмер (перезапуск, переход
+/// роли к резерву) продолжит с него и не пропустит команды, пришедшие в промежутке; устаревшие отклонит предел возраста.
 fn assigned_consumer(settings: &KafkaSettings, topic: &str) -> Result<StreamConsumer> {
     let consumer: StreamConsumer = settings
         .client_config()
@@ -498,12 +526,27 @@ fn assigned_consumer(settings: &KafkaSettings, topic: &str) -> Result<StreamCons
     }
     let committed = consumer.committed_offsets(query, Duration::from_secs(10))?;
     let mut tpl = TopicPartitionList::new();
+    let mut start_at_end = TopicPartitionList::new();
     for p in partitions {
         let offset = match committed.find_partition(topic, p).map(|e| e.offset()) {
-            Some(Offset::Offset(n)) => Offset::Offset(n),
-            _ => Offset::End,
+            Some(Offset::Offset(n)) => n,
+            _ => {
+                let (_, end) = consumer.fetch_watermarks(topic, p, Duration::from_secs(10))?;
+                start_at_end.add_partition_offset(topic, p, Offset::Offset(end))?;
+                end
+            }
         };
-        tpl.add_partition_offset(topic, p, offset)?;
+        tpl.add_partition_offset(topic, p, Offset::Offset(offset))?;
+    }
+    if start_at_end.count() > 0 {
+        match consumer.commit(&start_at_end, CommitMode::Sync) {
+            Ok(()) => info!(
+                "Kafka: у группы {} нет позиции в {topic} — команды читаются с конца топика, позиция сохранена",
+                settings.commands_group
+            ),
+            // Не мешает приёму: позиция сохранится с первой же командой.
+            Err(e) => warn!("Kafka: начальная позиция команд не сохранена ({e}) — сохранится с первой командой"),
+        }
     }
     consumer.assign(&tpl)?;
     Ok(consumer)
@@ -630,5 +673,18 @@ mod tests {
     #[test]
     fn unknown_property_is_an_error_not_silently_ignored() {
         assert!(producer(&settings_with(&[("no.such.property", "1")])).is_err());
+    }
+
+    /// Сеть до брокера — временная ошибка приёма команд (консьюмер остаётся); фатальная и прочие — пересоздание.
+    #[test]
+    fn network_errors_while_consuming_commands_are_transient() {
+        use RDKafkaErrorCode::*;
+        for code in
+            [BrokerTransportFailure, Resolve, AllBrokersDown, RequestTimedOut, BrokerNotAvailable, NetworkException]
+        {
+            assert!(is_transient(&KafkaError::MessageConsumption(code)), "{code:?}");
+        }
+        assert!(!is_transient(&KafkaError::MessageConsumptionFatal(BrokerTransportFailure)));
+        assert!(!is_transient(&KafkaError::MessageConsumption(UnknownTopicOrPartition)));
     }
 }
