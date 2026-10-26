@@ -23,6 +23,7 @@ use crate::leadership::Leadership;
 use crate::metrics::Metrics;
 use crate::model::{Controller, ControllerKind};
 use crate::opcua_cert;
+use crate::pac_alarms;
 use crate::supervisor::supervise;
 use crate::tag_settings::{self, TagSettingsStore};
 use crate::{http, poller};
@@ -59,6 +60,9 @@ pub struct Station {
     pub db: Option<PgPool>,
     /// БД была недоступна при запуске: подготовить её в фоне ([`spawn_db_sync`]).
     pub pending_db: Option<PendingDb>,
+    /// id аварий ПЛК выключенных (`enabled: false`) OPC UA-контроллеров: их снимки удаляются из топика аварий
+    /// ([`spawn_pac_alarms`]).
+    pub disabled_alarm_ids: Vec<String>,
 }
 
 /// Подготовка БД, отложенная до её появления: все контроллеры YAML (и выключенные — их строки в БД сохраняются) и имена.
@@ -109,10 +113,23 @@ pub async fn load_station(settings: &Settings) -> Result<Station> {
             (None, None)
         }
     };
-    let enabled: Vec<Controller> = controllers.into_iter().filter(|c| c.enabled).collect();
+    let (enabled, disabled): (Vec<Controller>, Vec<Controller>) = controllers.into_iter().partition(|c| c.enabled);
     let tag_count: usize = enabled.iter().map(|c| c.tags.len()).sum();
     info!("Загружено {} контроллеров, {tag_count} тегов", enabled.len());
-    Ok(Station { controllers: enabled, db, pending_db })
+    let disabled_alarm_ids = disabled_alarm_ids(&enabled, &disabled);
+    Ok(Station { controllers: enabled, db, pending_db, disabled_alarm_ids })
+}
+
+/// id аварий выключенных OPC UA-контроллеров, кроме совпавших с id включённого (его снимок удалять нельзя).
+fn disabled_alarm_ids(enabled: &[Controller], disabled: &[Controller]) -> Vec<String> {
+    let live: Vec<&str> = enabled.iter().map(pac_alarms::controller_id).collect();
+    let mut ids: Vec<String> = Vec::new();
+    for id in disabled.iter().filter(|c| c.kind == ControllerKind::OpcUa).map(pac_alarms::controller_id) {
+        if !live.contains(&id) && !ids.iter().any(|i| i == id) {
+            ids.push(id.to_string());
+        }
+    }
+    ids
 }
 
 /// БД, недоступная при запуске: ждать её в фоне, затем миграции и синхронизация конфигурации; номера тегов — в работающий
@@ -350,6 +367,39 @@ pub fn spawn_commands(app: &Arc<App>, leadership: &Arc<Leadership>, tasks: &mut 
             },
         )
     });
+}
+
+/// Аварии ПЛК (узел `SYSTEM.ALARMS` OPC UA-фасада ptusa): чтение и снимки по каждому OPC UA-контроллеру, удаление
+/// снимков выключенных контроллеров. Без Kafka, при `GATEWAY_PAC_ALARMS_ENABLED=false` или
+/// `KAFKA_PUBLISH_PAC_ALARMS=false` не запускается (команды `PAC_ALARM` при этом исполняются, если аварии включены).
+pub fn spawn_pac_alarms(app: &Arc<App>, disabled_ids: Vec<String>, tasks: &mut Tasks) {
+    if app.kafka.is_none() || !app.settings.gateway.pac_alarms_enabled || !app.settings.kafka.publish_pac_alarms {
+        return;
+    }
+    for handle in app.controllers.iter().filter(|h| h.ctrl.kind == ControllerKind::OpcUa) {
+        let ctrl = &handle.ctrl;
+        let Some(path) = pac_alarms::path(ctrl) else {
+            warn!(
+                "{}: аварии ПЛК не публикуются — у имён тегов нет общего начала, задайте alarmsPath в controllers.yaml",
+                ctrl.name
+            );
+            continue;
+        };
+        let from =
+            if ctrl.alarms_path.is_some() { "alarmsPath" } else { "общее начало имён тегов" };
+        info!("{}: аварии ПЛК — controllerId «{}», path «{path}» ({from})", ctrl.name, pac_alarms::controller_id(ctrl));
+        let (app, handle, cancel) = (app.clone(), handle.clone(), tasks.cancel.clone());
+        tasks.supervise(&format!("аварии {}", ctrl.name), move || {
+            pac_alarms::run(app.clone(), handle.clone(), path.clone(), cancel.clone())
+        });
+    }
+    if !disabled_ids.is_empty() {
+        info!("Снимки аварий выключенных контроллеров удаляются из топика: {}", disabled_ids.join(", "));
+        let (app, cancel) = (app.clone(), tasks.cancel.clone());
+        tasks.supervise("аварии: выключенные контроллеры", move || {
+            pac_alarms::tombstones(app.clone(), disabled_ids.clone(), cancel.clone())
+        });
+    }
 }
 
 /// Настройки тегов из топика `channel.tag-settings` (если Kafka и настройки включены): период опроса и зона истории на лету.

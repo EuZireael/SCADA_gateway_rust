@@ -49,9 +49,9 @@ docker run -d --name scada-gateway -p 8888:8888 \
 | Переменная | По умолчанию | Смысл |
 |---|---|---|
 | `SPRING_KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | брокеры |
-| `KAFKA_TOPICS_TELEMETRY` / `_COMMANDS` / `_COMMAND_RESULTS` / `_EVENTS` / `_ALARMS` | `scada.tags` / `scada-commands` / `scada-command-results` / `scada-events` / `scada-alarms` | топики |
+| `KAFKA_TOPICS_TELEMETRY` / `_COMMANDS` / `_COMMAND_RESULTS` / `_EVENTS` / `_ALARMS` / `_PAC_ALARMS` | `scada.tags` / `scada-commands` / `scada-command-results` / `scada-events` / `scada-alarms` / `scada.pac-alarms` | топики; `scada.pac-alarms` — compact |
 | `KAFKA_TOPICS_REPLICATION` | `1` | фактор репликации топиков, которые создаёт шлюз (на кластере — по числу брокеров) |
-| `KAFKA_PUBLISH_EVENTS`, `KAFKA_PUBLISH_ALARMS` | `true` | публиковать события и алармы |
+| `KAFKA_PUBLISH_EVENTS`, `KAFKA_PUBLISH_ALARMS`, `KAFKA_PUBLISH_PAC_ALARMS` | `true` | публиковать события, алармы и снимки аварий ПЛК |
 | `KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_MECHANISM`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` | — | TLS и SASL (PLAIN, SCRAM-SHA-256/512) |
 | `KAFKA_SSL_CA_LOCATION`, `KAFKA_SSL_CERTIFICATE_LOCATION`, `KAFKA_SSL_KEY_LOCATION`, `KAFKA_SSL_KEY_PASSWORD` | — | сертификаты (в том числе клиентский — mTLS) |
 | `KAFKA_CLIENT_<СВОЙСТВО>` | — | любое свойство librdkafka: `KAFKA_CLIENT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM=none` |
@@ -135,19 +135,31 @@ docker run -d --name scada-gateway -p 8888:8888 \
 | Статус результата | Когда |
 |---|---|
 | `APPLIED` | записано и подтверждено контроллером |
-| `REJECTED_UNKNOWN_TAG` | такого тега нет |
+| `REJECTED_UNKNOWN_TAG` | такого тега нет; у `PAC_ALARM` — контроллер не найден, выключен, не OPC UA, у сервера нет метода аварий или `GATEWAY_PAC_ALARMS_ENABLED=false` |
 | `REJECTED_NOT_WRITABLE` | тег только для чтения (или контроллер не принял запись как неразрешённую) |
 | `REJECTED_TYPE_MISMATCH` | значение не приводится к типу тега / сервер отверг тип |
 | `REJECTED_OUT_OF_RANGE` | значение вне `writeMin`/`writeMax` тега; пределы — в `message` |
 | `REJECTED_EXPIRED` | команда ждала дольше `GATEWAY_COMMANDS_MAX_AGE_MS` (шлюз был недоступен) |
+| `REJECTED_INVALID` | неизвестный `type` команды; у `PAC_ALARM` — неизвестное `action`, номер не задан (`null`, так у критических ошибок прошивки), не целый или вне `i32` |
 | `FAILED_NO_CONNECTION` | нет связи с контроллером |
-| `FAILED_WRITE` | контроллер ответил отказом |
+| `FAILED_WRITE` | контроллер ответил отказом; у `PAC_ALARM` — ошибка Lua в прошивке (`BadInvalidState` фасада) |
 | `FAILED_NOT_APPLIED` | только при `GATEWAY_COMMANDS_VERIFY_MS` > 0: ПЛК принял запись, но значение не изменилось (программа не разрешает действие, например клапан не в ручном режиме `M=1`) |
 
 `GATEWAY_COMMANDS_VERIFY_MS` (0 — выключено): шлюз читает значение до записи и через указанное время
 после (OPC UA — читает узел, PAC — запрашивает свежий снимок); если значение осталось прежним и не равно записанному — `FAILED_NOT_APPLIED`, `success=false`. Если
 значение изменилось на другое или чтение не удалось — результат `APPLIED`, как без проверки. Задержку берите
 больше цикла программы ПЛК (для ptusa — 500–1000 мс). Команда по PAC не проверяется (код 0 = «принято»).
+
+### Аварии ПЛК
+
+`GATEWAY_PAC_ALARMS_ENABLED` (true), `GATEWAY_PAC_ALARMS_INTERVAL_MS` (300). Активный экземпляр раз в интервал читает
+у каждого OPC UA-контроллера узел `SYSTEM.ALARMS` фасада `ptusa-opcua` и публикует снимок в `scada.pac-alarms`, когда
+изменился список или связь; задержка «авария в ПЛК → снимок» — до двух интервалов (фасад читает прошивку с тем же
+периодом). При запуске в журнале — `controllerId` и `path` каждого контроллера; у сервера без узла — строка «на сервере
+нет узла SYSTEM.ALARMS», снимков по нему нет. Повторяющаяся ошибка чтения (ответ прошивки не разобран — например,
+кавычка в тексте сообщения) — предупреждение раз в минуту, снимок не обновляется. Команда `PAC_ALARM` идёт в общий
+топик команд, исполняется в очереди контроллера; событие — `PAC_ALARM_COMMAND`. Снимок контроллера с `enabled: false`
+удаляется из топика (tombstone) при каждом получении роли активного; контроллер, убранный из YAML, удаляют вручную.
 
 ### Горячее резервирование
 
@@ -166,6 +178,8 @@ docker run -d --name scada-gateway -p 8888:8888 \
 принадлежит тег. От топика команд по умолчанию зависит группа выборов (`scada-gateway-ha.<топик команд>`), поэтому
 у каждой пары оказывается своя группа и свой активный. Остальные топики (телеметрия, результаты, события, алармы)
 можно оставить общими: ключ сообщения — полный путь тега с площадкой и проектом, он не повторяется между станциями.
+В общем `scada.pac-alarms` ключ — `id` контроллера: он должен быть уникален между станциями, иначе снимки затрут друг
+друга.
 
 ```sh
 # Станция BN1_MCA1, оба экземпляра пары (у второго — свой GATEWAY_HA_INSTANCE_ID)
@@ -180,7 +194,8 @@ GATEWAY_HA_INSTANCE_ID=tanks-a
 
 Служебный топик выборов `scada-gateway-ha` может быть общим: у каждой группы своё назначение его партиции. Группа
 позиций команд `scada-gateway-group` тоже может быть общей (позиция хранится по топику); свою (`GATEWAY_COMMANDS_GROUP_ID`)
-задают, чтобы развести права. ACL пользователя станции: `Write` в топики телеметрии, результатов, событий и алармов;
+задают, чтобы развести права. ACL пользователя станции: `Write` в топики телеметрии, результатов, событий, алармов и
+аварий ПЛК;
 `Read` своего топика команд, `scada-gateway-ha` и `channel.tag-settings`; `Read` и `Describe` своих групп — выборов
 и позиций команд. Шлюз сам создаёт недостающие топики; без права `Create` их создают заранее (топик выборов — с одной
 партицией).
@@ -281,6 +296,7 @@ scada_controllers_total` дольше N минут; `increase(scada_task_restart
 | Сбой | Поведение | Как увидеть |
 |---|---|---|
 | Контроллер недоступен | кадр BAD по его тегам, событие `CONNECTION`, переподключение; остальные контроллеры не страдают | `scada_controllers_connected`, health |
+| Фасад ptusa-opcua потерял связь с прошивкой (или шлюз — с фасадом) | снимок аварий `online: false` с последним списком; после возврата — `online: true` | `scada.pac-alarms`, журнал |
 | Все контроллеры недоступны у активного в паре | через `GATEWAY_HA_YIELD_AFTER_MS` роль уходит партнёру | события `HA`, `/api/ha` |
 | Брокер Kafka недоступен | опрос и обработка идут, сообщения копятся в очереди продюсера и теряются через 30 с; когда доставка вернулась, **все теги отправляются заново** (не ждут полной отправки) | health `kafka: DOWN`, `scada_kafka_send_errors_total`, `scada_kafka_resyncs_total` |
 | БД недоступна | телеметрия и команды не страдают; события и история теряются со счётчиком; шлюз подключается к БД сам, когда она вернулась | health `db: DOWN`, `scada_db_rows_lost_total` |

@@ -551,6 +551,7 @@ mod processor_tests {
             password: None,
             enabled: true,
             identity: None,
+            alarms_path: None,
             tags,
         })
         .unwrap();

@@ -110,6 +110,8 @@ SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9094 \
   нечувствительности) и раз в период — «полная отправка»; после сбоя брокера все теги отправляются заново сами.
 * **Команды записи** через Kafka: права, приведение типа, срок годности, защита от повтора, проверка, что ПЛК
   действительно изменил значение (`FAILED_NOT_APPLIED`), результат — в `scada-command-results`.
+* **Аварии ПЛК (ptusa).** Список аварий прошивки (через OPC UA-фасад `ptusa-opcua`) — снимком по контроллеру в
+  compact-топик `scada.pac-alarms`; квитирование и подавление — командой `PAC_ALARM` в тот же топик команд.
 * **Горячее резервирование.** Пара экземпляров на общем Kafka: отказ активного — переключение за ≈ 2 с, новый активный
   сразу шлёт все теги; «слепой» активный сам передаёт роль партнёру.
 * **Lua-скрипты** на канал: масштаб, фильтры, проверка обрыва датчика; перезагрузка без перезапуска; песочница с
@@ -176,9 +178,13 @@ opcua:
 | `scada-alarms` | шлюз → монитор | имя тега | аларм: порог, значение, важность, `cleared` |
 | `scada-commands` | монитор → шлюз | — | `{"commandId","tagName","value","requestedBy","timestamp"}` |
 | `scada-command-results` | шлюз → монитор | имя тега | `{"commandId","status","success","message","appliedValue",…}` |
+| `scada.pac-alarms` (compact) | шлюз → монитор | id контроллера | снимок аварий ПЛК: `{"controllerId","path","online","pacVersion","polledAt","alarms":[…]}` |
+
+Команда с `"type": "PAC_ALARM"` (`controllerId`, `action`: `ACCEPT`/`SUPPRESS`/`UNSUPPRESS`, `objectType`, `objectNumber`,
+`alarmNumber`) — действие над аварией ПЛК; без `type` или с `TAG_WRITE` — запись тега, как раньше.
 
 Статусы команд: `APPLIED`, `REJECTED_UNKNOWN_TAG`, `REJECTED_NOT_WRITABLE`, `REJECTED_TYPE_MISMATCH`, `REJECTED_OUT_OF_RANGE`,
-`REJECTED_EXPIRED`, `FAILED_NO_CONNECTION`, `FAILED_WRITE`, `FAILED_NOT_APPLIED`. Правила публикации «по исключению» —
+`REJECTED_EXPIRED`, `REJECTED_INVALID`, `FAILED_NO_CONNECTION`, `FAILED_WRITE`, `FAILED_NOT_APPLIED`. Правила публикации «по исключению» —
 `docs/TELEMETRY_BY_EXCEPTION.md`, подключение монитора — `docs/MONITOR_INTEGRATION.md`.
 
 ## Эксплуатация
@@ -239,6 +245,7 @@ src/
   telemetry.rs            обработка значений: скрипты, смена качества, алармы, фильтры, отправка
   filter.rs               правила публикации «по исключению»
   command.rs              команды записи: статусы, права, типы, проверка эффекта, дубли
+  pac_alarms.rs           аварии ПЛК: чтение списка у фасада ptusa-opcua, снимки, команда PAC_ALARM
   opcua.rs, modbus.rs, pac/   клиенты протоколов
   kafka.rs, messages.rs   продюсер, консьюмер команд, формат сообщений
   events.rs, db.rs        очереди журнала и истории, схема, запросы

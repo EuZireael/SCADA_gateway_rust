@@ -101,7 +101,8 @@ pub struct AlarmMessage {
 }
 
 /// Команда из `scada-commands`. Монитор адресует тег по имени (tagName); tagId — для
-/// старого Monitor Srv. Незнакомые поля игнорируются.
+/// старого Monitor Srv. Незнакомые поля игнорируются. Команда с `type: "PAC_ALARM"` — не запись тега, а действие над
+/// аварией ПЛК (`controllerId`, `action`, `objectType`, `objectNumber`, `alarmNumber`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandMessage {
@@ -120,6 +121,25 @@ pub struct CommandMessage {
     pub requested_by: Option<String>,
     /// Момент отправки команды (ISO-8601 или epoch-секунды) — для возраста, если у записи Kafka нет метки.
     pub timestamp: Option<Value>,
+    /// Вид команды: нет или `TAG_WRITE` — запись тега, `PAC_ALARM` — действие над аварией ПЛК. Как пришёл (не строка —
+    /// неизвестный вид, `REJECTED_INVALID`).
+    #[serde(rename = "type", default)]
+    pub kind: Value,
+    /// `PAC_ALARM`: контроллер — `id` из `controllers.yaml` (не задан — имя).
+    #[serde(default)]
+    pub controller_id: Value,
+    /// `PAC_ALARM`: `ACCEPT`, `SUPPRESS` или `UNSUPPRESS`.
+    #[serde(default)]
+    pub action: Value,
+    /// `PAC_ALARM`: тип объекта (`id_type` ptusa) — целое; проверяется при исполнении.
+    #[serde(default)]
+    pub object_type: Value,
+    /// `PAC_ALARM`: номер объекта (`id_n`).
+    #[serde(default)]
+    pub object_number: Value,
+    /// `PAC_ALARM`: номер аварии в объекте (`id_object_alarm_number`).
+    #[serde(default)]
+    pub alarm_number: Value,
 }
 
 impl CommandMessage {
@@ -137,6 +157,50 @@ impl CommandMessage {
 /// в теле. `None` — возраст неизвестен (такую команду исполняем).
 pub fn command_age_ms(cmd: &CommandMessage, record_timestamp_ms: Option<i64>, now_ms: i64) -> Option<i64> {
     record_timestamp_ms.filter(|t| *t > 0).or_else(|| cmd.sent_at_ms()).map(|sent| now_ms - sent)
+}
+
+/// Авария ПЛК в снимке `scada.pac-alarms`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PacAlarm {
+    /// `<objectType>:<objectNumber>:<alarmNumber>`, у критических ошибок прошивки — `C:<objectNumber>`.
+    pub key: String,
+    /// Тип объекта (`id_type`); у критических `null`.
+    pub object_type: Option<i64>,
+    /// Номер объекта, серийный номер устройства или параметр критической ошибки (`id_n`).
+    pub object_number: i64,
+    /// Номер аварии в объекте; у критических `null`.
+    pub alarm_number: Option<i64>,
+    /// Текст для оператора, как его прислал ПЛК.
+    pub description: String,
+    /// Группа: `тревога`, `сообщение`, `ответ`…
+    pub group: String,
+    /// Приоритет ptusa: 0 FATAL, 100 ошибка связи, 250 тревога, 500 сообщение, 750 ответ, 1000 напоминание.
+    pub priority: i64,
+    /// `ALARM`, `RETURN` (причина ушла, не квитирована) или `ACCEPT` (квитирована, причина есть).
+    pub state: String,
+    /// Подавлена.
+    pub suppressed: bool,
+}
+
+/// Снимок списка аварий контроллера → `scada.pac-alarms` (compact), ключ = id контроллера.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PacAlarmsMessage<'a> {
+    /// `id` контроллера из `controllers.yaml` (не задан — имя).
+    pub controller_id: &'a str,
+    /// Имя контроллера.
+    pub controller_name: &'a str,
+    /// Путь проекта в мониторе: `alarmsPath` или общий префикс имён тегов контроллера.
+    pub path: &'a str,
+    /// `false` — связи с ПЛК нет; `alarms` — последний известный список.
+    pub online: bool,
+    /// Счётчик изменений списка у ПЛК (`id` ptusa) последнего удачного чтения.
+    pub pac_version: Option<i64>,
+    /// Момент последнего удачного чтения (ISO-8601, мс, UTC).
+    pub polled_at: Option<String>,
+    /// Аварии в порядке ПЛК.
+    pub alarms: &'a [PacAlarm],
 }
 
 /// Результат команды → `scada-command-results`, ключ = tagName (или commandId).

@@ -373,6 +373,8 @@ mod tests {
             opc_security: Default::default(),
             acquisition: Default::default(),
             identity: None,
+            config_id: None,
+            alarms_path: None,
         })
     }
 

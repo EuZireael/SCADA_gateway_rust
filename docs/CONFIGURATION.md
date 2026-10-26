@@ -61,11 +61,13 @@
 | `KAFKA_TOPICS_EVENTS` | `scada-events` | события |
 | `KAFKA_TOPICS_COMMANDS` | `scada-commands` | команды (читаются) |
 | `KAFKA_TOPICS_COMMAND_RESULTS` | `scada-command-results` | результаты команд |
+| `KAFKA_TOPICS_PAC_ALARMS` | `scada.pac-alarms` | снимки аварий ПЛК; шлюз создаёт его compact (`cleanup.policy=compact`) с одной партицией — заранее создаваемый топик тоже должен быть compact, см. [ниже](#аварии-плк-ptusa) |
 | `CHANNEL_TAG_SETTINGS_TOPIC` | `channel.tag-settings` | настройки тегов от `channel` (читаются; шлюз топик не создаёт), см. [ниже](#настройки-тегов-из-channel) |
 | `GATEWAY_TAG_SETTINGS_ENABLED` | `true` | применять ли настройки тегов из этого топика; без топика теги работают по YAML |
 | `KAFKA_TOPICS_REPLICATION` | `1` | фактор репликации топиков, которые шлюз создаёт сам (на кластере — по числу брокеров). Существующие топики он не трогает |
 | `KAFKA_PUBLISH_EVENTS` | `true` | публиковать события в Kafka |
 | `KAFKA_PUBLISH_ALARMS` | `true` | публиковать алармы в Kafka |
+| `KAFKA_PUBLISH_PAC_ALARMS` | `true` | публиковать снимки аварий ПЛК |
 | `KAFKA_SECURITY_PROTOCOL` | — | `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, `SASL_SSL` |
 | `KAFKA_SASL_MECHANISM` | — | `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512` (Kerberos/GSSAPI не поддерживается) |
 | `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` | — | учётные данные SASL |
@@ -134,6 +136,18 @@
 | `GATEWAY_HISTORY_DEADBAND`, `…_DEADBAND_PERCENT`, `…_MIN_INTERVAL_MS` | `0` | фильтр истории; тег переопределяет блоком `history:` |
 | `GATEWAY_HISTORY_MAX_INTERVAL_MS` | `600000` | «пульс» истории: точка раз в столько, даже если значение стоит; `0` — выключен |
 
+### Аварии ПЛК (ptusa)
+
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `GATEWAY_PAC_ALARMS_ENABLED` | `true` | читать аварии у OPC UA-контроллеров (узел `ns=2;s=SYSTEM.ALARMS` фасада `ptusa-opcua`) и исполнять команды `PAC_ALARM`. `false` — снимков нет, команда `PAC_ALARM` получает `REJECTED_UNKNOWN_TAG` |
+| `GATEWAY_PAC_ALARMS_INTERVAL_MS` | `300` | как часто читать список аварий контроллера (`0` — ошибка запуска: выключают `GATEWAY_PAC_ALARMS_ENABLED`) |
+
+Аварии читаются у каждого включённого OPC UA-контроллера; у сервера без узла `SYSTEM.ALARMS` (не фасад ptusa) их нет —
+одна строка в журнале. Снимок в Kafka несёт `controllerId` (поле `id` контроллера, не задан — `name`) и `path` — путь
+проекта в мониторе (`alarmsPath` контроллера, не задан — общее начало имён его тегов по сегментам через точку; при
+запуске шлюз пишет в журнал, что вычислил). Формат снимка и команды — `docs/MONITOR_INTEGRATION.md`.
+
 ### Горячее резервирование
 
 Устройство — `docs/ARCHITECTURE.md`, поведение при сбоях — `docs/OPERATIONS.md`.
@@ -199,7 +213,8 @@ opcua:
 | `acquisition` | `poll` | только OPC UA. `poll` — шлюз каждый цикл читает «созревшие» теги запросом Read; `subscription` — подписки (MonitoredItems), сервер сам присылает изменения — см. «OPC UA: подписки» |
 | `username`, `password` | — | только OPC UA, задаются **вместе**. На канале `None` идут открытым текстом (предупреждение) |
 | `identity` | — | как опознать контроллер при подключении, см. ниже. Только PAC и OPC UA |
-| `id` | — | не используется |
+| `id` | — | id контроллера для аварий ПЛК: ключ снимка в `scada.pac-alarms` и `controllerId` команды `PAC_ALARM`; не задан — `name`. На общем Kafka должен быть уникален между станциями |
+| `alarmsPath` | — | только OPC UA: путь проекта в мониторе для снимка аварий ПЛК (`path`). Не задан — общее начало имён тегов; если у имён нет общего начала, аварии контроллера не публикуются (предупреждение при запуске) |
 | `tags` | — | список тегов |
 
 `security`/`username`/`password` у Modbus и PAC — ошибка запуска: защиты на уровне этих протоколов нет, и делать вид, что
@@ -373,7 +388,7 @@ scripts:
 * `nodeId` повторяется в пределах контроллера;
 * у PAC-тега нет `deviceName`/`fieldName` или в них недопустимые символы;
 * у Modbus-тега нет `modbusAddress`, он вне 40001…105536 или `modbusUnitId` у тегов контроллера разные;
-* неверное число, время или режим в любой переменной окружения, неверный `sslmode`;
+* неверное число, время или режим в любой переменной окружения, неверный `sslmode`; `GATEWAY_PAC_ALARMS_INTERVAL_MS=0`;
 * `GATEWAY_HA_ENABLED=true` при выключенной Kafka;
 * у контроллеров OPC UA задан свой сертификат (`GATEWAY_OPCUA_CERT_FILE`) или есть защищённый канал, а сертификат
   клиента не читается, ключ не от него или URI приложения не совпадает с сертификатом;

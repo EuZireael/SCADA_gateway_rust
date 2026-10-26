@@ -318,6 +318,10 @@ pub struct Controller {
     pub acquisition: Acquisition,
     /// Как опознать контроллер при подключении; `None` — имя не сверяется.
     pub identity: Option<crate::config::IdentityConfig>,
+    /// `id` из YAML: ключ снимка аварий ПЛК и `controllerId` команды квитирования (не задан — `name`, см. [`crate::pac_alarms::controller_id`]).
+    pub config_id: Option<String>,
+    /// `alarmsPath` из YAML: путь проекта в мониторе для снимка аварий.
+    pub alarms_path: Option<String>,
 }
 
 impl Controller {
@@ -332,6 +336,8 @@ impl Controller {
             opc_security: cfg.opc_security().unwrap_or_default(),
             acquisition: Acquisition::parse(cfg.acquisition.as_deref()).unwrap_or_default(),
             identity: cfg.identity.clone(),
+            config_id: cfg.id.clone().filter(|id| !id.trim().is_empty()),
+            alarms_path: cfg.alarms_path.clone().filter(|p| !p.trim().is_empty()),
             tags: cfg
                 .tags
                 .iter()
@@ -597,6 +603,7 @@ mod tests {
             password: None,
             enabled: true,
             identity: None,
+            alarms_path: None,
             tags: vec![t.clone()],
         };
         assert_eq!(Controller::from_config(&s).unwrap().cycle_period_ms(), 2000);

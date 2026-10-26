@@ -25,6 +25,7 @@ pub mod model;
 pub mod opcua;
 pub mod opcua_cert;
 pub mod pac;
+pub mod pac_alarms;
 pub mod poller;
 pub mod sandbox;
 pub mod schedule;

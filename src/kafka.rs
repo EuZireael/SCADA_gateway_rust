@@ -24,7 +24,9 @@ use tracing::{error, info, warn};
 use crate::config::{KafkaSettings, Topics};
 use crate::events::Throttle;
 use crate::leadership::{Leadership, RoleChange};
-use crate::messages::{AlarmMessage, CommandMessage, CommandResultMessage, EventMessage, TelemetryMessage};
+use crate::messages::{
+    AlarmMessage, CommandMessage, CommandResultMessage, EventMessage, PacAlarmsMessage, TelemetryMessage,
+};
 use crate::metrics::Metrics;
 
 /// Как часто повторять предупреждение о недоставленных сообщениях (при обрыве брокера их тысячи).
@@ -147,6 +149,7 @@ pub struct KafkaOut {
     topics: Topics,
     publish_events: bool,
     publish_alarms: bool,
+    publish_pac_alarms: bool,
     metrics: Arc<Metrics>,
     /// Горячий резерв: события и алармы в Kafka шлёт только активный экземпляр.
     leadership: Arc<Leadership>,
@@ -209,6 +212,7 @@ impl KafkaOut {
             topics: settings.topics.clone(),
             publish_events: settings.publish_events,
             publish_alarms: settings.publish_alarms,
+            publish_pac_alarms: settings.publish_pac_alarms,
             metrics,
             leadership,
             delivery,
@@ -299,6 +303,30 @@ impl KafkaOut {
         }
     }
 
+    /// Снимок аварий ПЛК (ключ — id контроллера): только активный экземпляр и только если публикация включена.
+    pub fn send_pac_alarms(&self, message: &PacAlarmsMessage) {
+        if self.publish_pac_alarms && self.leadership.is_active() {
+            self.send(&self.topics.pac_alarms, message.controller_id, message);
+        }
+    }
+
+    /// Удалить снимок аварий контроллера из compact-топика (tombstone — сообщение без тела): контроллер выключен.
+    pub fn send_pac_alarms_tombstone(&self, controller_id: &str) {
+        if !self.publish_pac_alarms || !self.leadership.is_active() {
+            return;
+        }
+        let topic = &self.topics.pac_alarms;
+        if cfg!(test) {
+            let captured = (topic.clone(), controller_id.to_string(), String::new());
+            self.captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(captured);
+            return;
+        }
+        if let Err((e, _)) = self.producer.send(BaseRecord::<str, [u8]>::to(topic).key(controller_id)) {
+            self.metrics.kafka_send_errors.inc();
+            warn!("Kafka: {topic} не принял удаление снимка {controller_id}: {e}");
+        }
+    }
+
     /// Результат команды (ключ — имя тега или `commandId`). Всегда: команды принимает только активный экземпляр.
     pub fn send_result(&self, message: &CommandResultMessage) {
         let key = message.tag_name.as_deref().or(message.command_id.as_deref()).unwrap_or("");
@@ -319,20 +347,28 @@ impl KafkaOut {
 }
 
 /// Создать топики шлюза, если их нет (партиции — как у Java-шлюза). Уже существующие не трогаем;
-/// недоступный брокер — не повод не стартовать (брокер может подняться позже).
+/// недоступный брокер — не повод не стартовать (брокер может подняться позже). Топик аварий ПЛК — compact: в нём
+/// хранится последний снимок каждого контроллера.
 pub async fn ensure_topics(settings: &KafkaSettings) {
     let t = &settings.topics;
-    let specs = [(&t.telemetry, 3), (&t.alarms, 2), (&t.events, 1), (&t.commands, 1), (&t.command_results, 1)];
-    create_topics(settings, &specs.iter().map(|(n, p)| (n.as_str(), *p)).collect::<Vec<_>>()).await;
+    let specs = [
+        (&t.telemetry, 3, false),
+        (&t.alarms, 2, false),
+        (&t.events, 1, false),
+        (&t.commands, 1, false),
+        (&t.command_results, 1, false),
+        (&t.pac_alarms, 1, true),
+    ];
+    create_topics(settings, &specs.iter().map(|(n, p, c)| (n.as_str(), *p, *c)).collect::<Vec<_>>()).await;
 }
 
 /// Один топик (служебный топик выборов).
 pub async fn ensure_topic(settings: &KafkaSettings, name: &str, partitions: i32) {
-    create_topics(settings, &[(name, partitions)]).await;
+    create_topics(settings, &[(name, partitions, false)]).await;
 }
 
-/// Создать топики, которых нет; недоступный брокер или отказ — предупреждение, а не ошибка запуска.
-async fn create_topics(settings: &KafkaSettings, specs: &[(&str, i32)]) {
+/// Создать топики, которых нет (имя, партиции, compact); недоступный брокер или отказ — предупреждение, а не ошибка запуска.
+async fn create_topics(settings: &KafkaSettings, specs: &[(&str, i32, bool)]) {
     let admin: AdminClient<DefaultClientContext> = match settings.client_config().create() {
         Ok(a) => a,
         Err(e) => {
@@ -342,7 +378,10 @@ async fn create_topics(settings: &KafkaSettings, specs: &[(&str, i32)]) {
     };
     let topics: Vec<NewTopic> = specs
         .iter()
-        .map(|(name, parts)| NewTopic::new(name, *parts, TopicReplication::Fixed(settings.replication)))
+        .map(|(name, parts, compact)| {
+            let topic = NewTopic::new(name, *parts, TopicReplication::Fixed(settings.replication));
+            if *compact { topic.set("cleanup.policy", "compact") } else { topic }
+        })
         .collect();
     let opts = AdminOptions::new().operation_timeout(Some(Duration::from_secs(10)));
     match tokio::time::timeout(Duration::from_secs(15), admin.create_topics(topics.iter(), &opts)).await {
