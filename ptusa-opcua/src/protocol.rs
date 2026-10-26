@@ -32,6 +32,10 @@ pub const CMD_GET_INFO_ON_CONNECT: u8 = 10;
 pub const CMD_GET_DEVICES_STATES: u8 = 101;
 /// Команда: выполнить команду прибора.
 pub const CMD_EXEC_DEVICE_COMMAND: u8 = 102;
+/// Команда: список аварий прошивки (данные — номер описания проекта, всегда 0).
+pub const CMD_GET_PAC_ERRORS: u8 = 103;
+/// Команда: действие над аварией (`errors_manager…set_cmd`), ответ — как у EXEC_DEVICE_COMMAND.
+pub const CMD_SET_PAC_ERROR_CMD: u8 = 104;
 
 /// Кадр запроса: заголовок + `cmd` + доп. данные.
 pub fn build_request(pidx: u8, cmd: u8, extra: &[u8]) -> Vec<u8> {
@@ -61,7 +65,7 @@ pub fn inflate(data: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Код результата EXEC_DEVICE_COMMAND (LE16): 0 — применено, иначе команда не выполнилась.
+/// Код результата EXEC_DEVICE_COMMAND и SET_PAC_ERROR_CMD (LE16): 0 — применено, иначе команда не выполнилась.
 pub fn exec_result_code(body: &[u8]) -> u16 {
     if body.len() >= 2 { u16::from_le_bytes([body[0], body[1]]) } else { 0 }
 }

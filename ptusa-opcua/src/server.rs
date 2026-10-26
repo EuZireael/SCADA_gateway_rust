@@ -2,6 +2,8 @@
 //!
 //! Узлы получают значения из снимка раз в период опроса; запись клиента идёт командой прошивке из обработчика записи
 //! (синхронного) — по отдельному соединению и в отдельном рантайме, см. `add_write_callbacks` (нужен многопоточный рантайм tokio).
+//! Список аварий прошивки читает свой цикл по своему соединению ([`AlarmBridge`]); действие над аварией — метод, он идёт
+//! тем же путём, что запись.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,15 +11,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
-use opcua::server::address_space::{ObjectBuilder, VariableBuilder};
+use opcua::server::address_space::{MethodBuilder, ObjectBuilder, VariableBuilder};
 use opcua::server::diagnostics::NamespaceMetadata;
 use opcua::server::node_manager::memory::{SimpleNodeManager, simple_node_manager};
 use opcua::server::{Server, ServerBuilder, ServerHandle};
-use opcua::types::{DataTypeId, DataValue, DateTime, NodeId, ObjectId, StatusCode, Variant};
+use opcua::types::{Argument, DataTypeId, DataValue, DateTime, NodeId, ObjectId, StatusCode, Variant};
 use tracing::{info, warn};
 
+use crate::alarms::{self, Action, AlarmsReader};
 use crate::channel::{Channel, Converted, Kind, command_text, convert};
 use crate::pac::PacClient;
+use crate::protocol::{CMD_EXEC_DEVICE_COMMAND, CMD_SET_PAC_ERROR_CMD};
 use crate::security::{Security, warn_if_expiring};
 use crate::snapshot::Snapshot;
 
@@ -32,6 +36,12 @@ const REPORT_EVERY: Duration = Duration::from_secs(60);
 pub const SYSTEM_PAC_NAME: &str = "SYSTEM.PAC_NAME";
 /// См. [`SYSTEM_PAC_NAME`].
 pub const SYSTEM_LINK_OK: &str = "SYSTEM.LINK_OK";
+/// Узел со списком аварий прошивки (JSON, см. [`alarms::Alarms`]).
+pub const SYSTEM_ALARMS: &str = "SYSTEM.ALARMS";
+/// Метод «действие над аварией»: `(Action: String, ObjectType: Int32, ObjectNumber: Int32, AlarmNumber: Int32)`.
+pub const SYSTEM_ALARM_CMD: &str = "SYSTEM.ALARM_CMD";
+/// Как часто писать в журнал повторяющуюся ошибку чтения аварий.
+const ALARMS_ERROR_EVERY: Duration = Duration::from_secs(60);
 /// Счётчики работы фасада для сводки в журнале.
 #[derive(Default)]
 pub struct Stats {
@@ -41,9 +51,12 @@ pub struct Stats {
     pub commands: AtomicU64,
     /// Из них отклонено прошивкой.
     pub rejected: AtomicU64,
+    /// Списков аварий прочитано.
+    pub alarm_polls: AtomicU64,
 }
 
 /// Кладёт значения и статусы в узлы запущенного сервера.
+#[derive(Clone)]
 pub struct Pusher {
     handle: ServerHandle,
     manager: Arc<SimpleNodeManager>,
@@ -111,6 +124,25 @@ impl Pusher {
                 self.handle.subscriptions(),
                 [(&name_id, None, name_value), (&link_id, None, link)].into_iter(),
             );
+        });
+    }
+
+    /// Список аварий (JSON) или плохой статус узла `SYSTEM.ALARMS`.
+    pub fn push_alarms(&self, value: Result<&str, StatusCode>) {
+        let ts = DateTime::now();
+        let dv = match value {
+            Ok(json) => DataValue {
+                value: Some(Variant::from(json)),
+                status: Some(StatusCode::Good),
+                source_timestamp: Some(ts),
+                server_timestamp: Some(ts),
+                ..Default::default()
+            },
+            Err(status) => bad_value(status, ts),
+        };
+        let id = NodeId::new(self.ns, SYSTEM_ALARMS);
+        tokio::task::block_in_place(|| {
+            let _ = self.manager.set_values(self.handle.subscriptions(), [(&id, None, dv)].into_iter());
         });
     }
 
@@ -182,8 +214,7 @@ fn scalar(v: &Variant) -> Option<String> {
     })
 }
 
-/// Запись клиента → команда прошивке; её исход — статус записи. Идёт по своему соединению `cmd_pac` (оно открывается
-/// при первой команде и после обрыва); `pac` — общий опрос, по нему видно, жива ли связь с прошивкой.
+/// Запись клиента → команда прошивке; её исход — статус записи.
 async fn command(ch: &Channel, value: &Variant, pac: &PacClient, cmd_pac: &PacClient, stats: &Stats) -> StatusCode {
     stats.commands.fetch_add(1, Ordering::Relaxed);
     // Строковый канал прошивке командой не пишется (set_cmd принимает только числа).
@@ -191,12 +222,19 @@ async fn command(ch: &Channel, value: &Variant, pac: &PacClient, cmd_pac: &PacCl
         stats.rejected.fetch_add(1, Ordering::Relaxed);
         return StatusCode::BadTypeMismatch;
     };
+    send(CMD_EXEC_DEVICE_COMMAND, &command_text(ch, &scalar), pac, cmd_pac, stats).await
+}
+
+/// Lua-команда прошивке (`cmd` — EXEC_DEVICE_COMMAND или SET_PAC_ERROR_CMD); её исход — статус OPC UA. Идёт по своему
+/// соединению `cmd_pac` (оно открывается при первой команде и после обрыва); `pac` — общий опрос, по нему видно, жива ли
+/// связь с прошивкой.
+async fn send(cmd: u8, text: &str, pac: &PacClient, cmd_pac: &PacClient, stats: &Stats) -> StatusCode {
     if !pac.connected() {
         return StatusCode::BadCommunicationError;
     }
-    let text = command_text(ch, &scalar);
     // Соединение команд могло оборваться, пока им не пользовались (прошивку перезапускали, простой): первая же неудача —
-    // повод открыть новое и повторить команду один раз. set_cmd значения идемпотентна.
+    // повод открыть новое и повторить команду один раз. set_cmd значения идемпотентна, действия над аварией — тоже
+    // (повтор квитирования или подавления ничего не меняет).
     for attempt in 0..2 {
         if !cmd_pac.connected()
             && let Err(e) = cmd_pac.connect().await
@@ -204,7 +242,7 @@ async fn command(ch: &Channel, value: &Variant, pac: &PacClient, cmd_pac: &PacCl
             warn!("команда {text}: нет связи с прошивкой: {e:#}");
             return StatusCode::BadCommunicationError;
         }
-        match cmd_pac.command(&text).await {
+        match cmd_pac.command(cmd, text).await {
             Ok(0) => {
                 info!("✍ {text}");
                 return StatusCode::Good;
@@ -251,7 +289,24 @@ fn populate(manager: &SimpleNodeManager, ns: u16, channels: &[Channel]) -> usize
     VariableBuilder::new(&NodeId::new(ns, SYSTEM_LINK_OK), "LINK_OK", "LINK_OK")
         .data_type(DataTypeId::Boolean)
         .value(Variant::Boolean(false))
-        .organized_by(system)
+        .organized_by(system.clone())
+        .insert(&mut *space);
+    VariableBuilder::new(&NodeId::new(ns, SYSTEM_ALARMS), "ALARMS", "ALARMS")
+        .data_type(DataTypeId::String)
+        .value(Variant::from(""))
+        .organized_by(system.clone())
+        .insert(&mut *space);
+    let args: [Argument; 4] = [
+        ("Action", DataTypeId::String).into(),
+        ("ObjectType", DataTypeId::Int32).into(),
+        ("ObjectNumber", DataTypeId::Int32).into(),
+        ("AlarmNumber", DataTypeId::Int32).into(),
+    ];
+    MethodBuilder::new(&NodeId::new(ns, SYSTEM_ALARM_CMD), "ALARM_CMD", "ALARM_CMD")
+        .component_of(system)
+        .input_args(&mut *space, &NodeId::new(ns, format!("{SYSTEM_ALARM_CMD}.InputArguments")), &args)
+        .executable(true)
+        .user_executable(true)
         .insert(&mut *space);
     for ch in channels {
         let parent = devices
@@ -287,23 +342,9 @@ fn populate(manager: &SimpleNodeManager, ns: u16, channels: &[Channel]) -> usize
 /// чтения останавливает на этой самой блокировке, — ответ некому принять, и сервер замирает (у шлюза — таймауты и
 /// «handshake завис»). Поэтому команды идут по отдельному соединению и в отдельном рантайме со своим драйвером, а
 /// обработчик ждёт исхода обычным каналом.
-fn add_write_callbacks(
-    manager: &SimpleNodeManager,
-    ns: u16,
-    channels: &[Channel],
-    pac: &Arc<PacClient>,
-    stats: &Arc<Stats>,
-) {
-    // Рантайм команд живёт до конца процесса (его нельзя уронить из асинхронного контекста).
-    let rt: &'static tokio::runtime::Runtime = Box::leak(Box::new(
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .thread_name("pac-commands")
-            .enable_all()
-            .build()
-            .expect("рантайм команд"),
-    ));
-    let cmd_pac = Arc::new(pac.sibling());
+fn add_write_callbacks(manager: &SimpleNodeManager, ns: u16, channels: &[Channel], commands: &Commands) {
+    let Commands { rt, pac, cmd_pac, stats } = commands;
+    let rt: &'static tokio::runtime::Runtime = rt;
     for ch in channels.iter().filter(|c| c.writable) {
         let (ch_cb, pac, cmd_pac, stats) = (ch.clone(), pac.clone(), cmd_pac.clone(), stats.clone());
         manager.inner().add_write_callback(NodeId::new(ns, ch.node_name.clone()), move |dv: DataValue, _range| {
@@ -317,6 +358,55 @@ fn add_write_callbacks(
             tokio::task::block_in_place(|| rx.recv()).unwrap_or(StatusCode::BadInternalError)
         });
     }
+}
+
+/// Аргументы метода `SYSTEM.ALARM_CMD`: действие и три целых (типы сервер не сверяет — проверяем здесь).
+fn alarm_args(args: &[Variant]) -> Result<(Action, i32, i32, i32), StatusCode> {
+    match args {
+        [
+            Variant::String(action),
+            Variant::Int32(object_type),
+            Variant::Int32(object_number),
+            Variant::Int32(alarm),
+        ] => {
+            let action = Action::parse(action.as_ref()).ok_or(StatusCode::BadInvalidArgument)?;
+            Ok((action, *object_type, *object_number, *alarm))
+        }
+        _ if args.len() < 4 => Err(StatusCode::BadArgumentsMissing),
+        _ => Err(StatusCode::BadInvalidArgument),
+    }
+}
+
+/// Метод `SYSTEM.ALARM_CMD`: действие над аварией — команда SET_PAC_ERROR_CMD прошивке, тем же путём, что запись
+/// (см. [`add_write_callbacks`]). Роль `read` метод не вызовет (`security`).
+fn add_alarm_command(manager: &SimpleNodeManager, ns: u16, commands: &Commands) {
+    let Commands { rt, pac, cmd_pac, stats } = commands;
+    let rt: &'static tokio::runtime::Runtime = rt;
+    let (pac, cmd_pac, stats) = (pac.clone(), cmd_pac.clone(), stats.clone());
+    manager.inner().add_method_callback(NodeId::new(ns, SYSTEM_ALARM_CMD), move |args: &[Variant]| {
+        stats.commands.fetch_add(1, Ordering::Relaxed);
+        let (action, object_type, object_number, alarm) = alarm_args(args).inspect_err(|_| {
+            stats.rejected.fetch_add(1, Ordering::Relaxed);
+        })?;
+        let text = alarms::command_text(action, object_type, object_number, alarm);
+        let (pac, cmd_pac, stats) = (pac.clone(), cmd_pac.clone(), stats.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        rt.spawn(async move {
+            let _ = tx.send(send(CMD_SET_PAC_ERROR_CMD, &text, &pac, &cmd_pac, &stats).await);
+        });
+        match tokio::task::block_in_place(|| rx.recv()).unwrap_or(StatusCode::BadInternalError) {
+            StatusCode::Good => Ok(Vec::new()),
+            status => Err(status),
+        }
+    });
+}
+
+/// Чем исполняются команды клиентов: свой рантайм, свое соединение с прошивкой и общий опрос (по нему видно связь).
+struct Commands {
+    rt: &'static tokio::runtime::Runtime,
+    pac: Arc<PacClient>,
+    cmd_pac: Arc<PacClient>,
+    stats: Arc<Stats>,
 }
 
 /// Собирает сервер с адресным пространством из каналов. Сервер надо запустить (`run`).
@@ -366,10 +456,22 @@ pub fn build(
     ensure!(ns == 2, "namespace должен быть 2, а не {ns}: узлы станции — ns=2;s=<прибор>.<поле>");
 
     let devices = populate(&manager, ns, channels);
-    add_write_callbacks(&manager, ns, channels, &pac, &stats);
+    // Рантайм команд живёт до конца процесса (его нельзя уронить из асинхронного контекста).
+    let rt: &'static tokio::runtime::Runtime = Box::leak(Box::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("pac-commands")
+            .enable_all()
+            .build()
+            .expect("рантайм команд"),
+    ));
+    let commands = Commands { rt, cmd_pac: Arc::new(pac.sibling()), pac, stats };
+    add_write_callbacks(&manager, ns, channels, &commands);
+    add_alarm_command(&manager, ns, &commands);
     let pusher = Pusher { handle, manager, ns };
     pusher.push_all_bad(channels, StatusCode::BadWaitingForInitialData);
     pusher.push_system(None, false);
+    pusher.push_alarms(Err(StatusCode::BadWaitingForInitialData));
     info!(
         "адресное пространство: {} каналов ({} на запись), {devices} объектов",
         channels.len(),
@@ -430,8 +532,9 @@ impl Bridge {
                     if last_report.elapsed() >= REPORT_EVERY {
                         last_report = Instant::now();
                         info!(
-                            "снимков {}, команд {} (отклонено {}), каналов без значения {missing}",
+                            "снимков {}, списков аварий {}, команд {} (отклонено {}), каналов без значения {missing}",
                             self.stats.polls.load(Ordering::Relaxed),
+                            self.stats.alarm_polls.load(Ordering::Relaxed),
                             self.stats.commands.load(Ordering::Relaxed),
                             self.stats.rejected.load(Ordering::Relaxed)
                         );
@@ -455,6 +558,83 @@ impl Bridge {
     }
 }
 
+/// Что сейчас в узле `SYSTEM.ALARMS`: в узел пишется только перемена.
+#[derive(PartialEq)]
+enum AlarmsNode {
+    Waiting,
+    List(String),
+    Bad(StatusCode),
+}
+
+/// Цикл аварий: список прошивки (GET_PAC_ERRORS) → узел `SYSTEM.ALARMS` с заданным периодом, по своему соединению — сбой
+/// или долгий разбор списка не задерживает снимок. Обрыв — узел `BadCommunicationError` и повтор с паузой 1 → 10 с;
+/// неразобранный ответ — `BadDecodingError` (прежний список за свежий не выдаётся).
+pub struct AlarmBridge {
+    /// Своё соединение с прошивкой (`PacClient::sibling` клиента опроса).
+    pub pac: PacClient,
+    pub pusher: Pusher,
+    pub reader: AlarmsReader,
+    pub poll: Duration,
+    pub stats: Arc<Stats>,
+}
+
+impl AlarmBridge {
+    /// Положить в узел, если там другое.
+    fn show(&self, node: &mut AlarmsNode, next: AlarmsNode) {
+        if *node != next {
+            self.pusher.push_alarms(match &next {
+                AlarmsNode::List(json) => Ok(json),
+                AlarmsNode::Bad(status) => Err(*status),
+                AlarmsNode::Waiting => Err(StatusCode::BadWaitingForInitialData),
+            });
+            *node = next;
+        }
+    }
+
+    pub async fn run(self) {
+        let (mut node, mut backoff) = (AlarmsNode::Waiting, Duration::from_secs(1));
+        let mut last_error = Instant::now() - ALARMS_ERROR_EVERY;
+        loop {
+            let started = Instant::now();
+            let step = async {
+                if !self.pac.connected() {
+                    self.pac.connect().await?;
+                    backoff = Duration::from_secs(1);
+                }
+                self.pac.alarms().await
+            };
+            match step.await {
+                Ok(text) => {
+                    self.stats.alarm_polls.fetch_add(1, Ordering::Relaxed);
+                    let next = match self.reader.parse(&text) {
+                        Ok(list) => AlarmsNode::List(serde_json::to_string(&list).expect("список аварий — JSON")),
+                        Err(e) => {
+                            if last_error.elapsed() >= ALARMS_ERROR_EVERY {
+                                last_error = Instant::now();
+                                warn!("аварии прошивки: ответ не разобран: {e:#}");
+                            }
+                            AlarmsNode::Bad(StatusCode::BadDecodingError)
+                        }
+                    };
+                    self.show(&mut node, next);
+                    tokio::time::sleep(self.poll.saturating_sub(started.elapsed())).await;
+                }
+                Err(e) => {
+                    self.pac.close().await;
+                    // Соединение своё, и сбой бывает только у него; повторяющийся (нет прошивки) — не чаще раза в минуту.
+                    if last_error.elapsed() >= ALARMS_ERROR_EVERY {
+                        last_error = Instant::now();
+                        warn!("аварии прошивки: нет связи: {e:#}");
+                    }
+                    self.show(&mut node, AlarmsNode::Bad(StatusCode::BadCommunicationError));
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(10));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,6 +645,18 @@ mod tests {
         assert!(parse_bind("4840").is_err());
         assert!(parse_bind(":4840").is_err());
         assert!(parse_bind("host:x").is_err());
+    }
+
+    #[test]
+    fn alarm_command_arguments_are_checked() {
+        let args = |a: &str, t: i32| vec![Variant::from(a), Variant::Int32(t), Variant::Int32(2), Variant::Int32(3)];
+        assert_eq!(alarm_args(&args("ACCEPT", 102)), Ok((Action::Accept, 102, 2, 3)));
+        assert_eq!(alarm_args(&args("SUPPRESS", 0)), Ok((Action::Suppress, 0, 2, 3)));
+        assert_eq!(alarm_args(&args("DELETE", 102)), Err(StatusCode::BadInvalidArgument));
+        assert_eq!(alarm_args(&args("ACCEPT", 1)[..3]), Err(StatusCode::BadArgumentsMissing));
+        let mut float = args("ACCEPT", 1);
+        float[3] = Variant::Double(3.0);
+        assert_eq!(alarm_args(&float), Err(StatusCode::BadInvalidArgument));
     }
 
     #[test]

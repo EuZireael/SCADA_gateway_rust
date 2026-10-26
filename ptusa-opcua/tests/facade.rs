@@ -7,13 +7,14 @@ use std::time::Duration;
 
 use opcua::client::{ClientBuilder, IdentityToken, Session};
 use opcua::types::{
-    AttributeId, DataValue, EndpointDescription, MessageSecurityMode, NodeId, NumericRange, ReadValueId, StatusCode,
-    TimestampsToReturn, UserTokenPolicy, Variant, WriteValue,
+    AttributeId, DataValue, DateTime, EndpointDescription, MessageSecurityMode, NodeId, NumericRange, ReadValueId,
+    StatusCode, TimestampsToReturn, UserTokenPolicy, Variant, WriteValue,
 };
+use ptusa_opcua::alarms::AlarmsReader;
 use ptusa_opcua::channel::load_channels;
 use ptusa_opcua::pac::PacClient;
 use ptusa_opcua::security::{Security, hash_password, parse_users};
-use ptusa_opcua::server::{Bridge, Stats, build};
+use ptusa_opcua::server::{AlarmBridge, Bridge, Stats, build};
 use ptusa_opcua::snapshot::Snapshot;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -21,12 +22,15 @@ use tokio::task::JoinHandle;
 
 // ---------------------------------------------------------------- фейковый PAC --
 
-/// Прошивка: приборы с полями, снимок `t=…`, `set_cmd` меняет поле; код ≠ 0 для чужих приборов.
+/// Прошивка: приборы с полями, снимок `t=…`, `set_cmd` меняет поле; код ≠ 0 для чужих приборов. Аварии — сообщения
+/// объектов (`id_type`, `id_n`, номер, текст): любая команда над сообщением удаляет его, как у ptusa; тип 999 — ошибка Lua.
 #[derive(Default)]
 struct PacState {
     devices: Vec<(String, Vec<(String, f64)>)>,
     rt_par_f: Vec<f64>,
     commands: Vec<String>,
+    alarms: Vec<(i32, i32, i32, String)>,
+    alarms_id: u32,
 }
 
 impl PacState {
@@ -39,7 +43,41 @@ impl PacState {
             ],
             rt_par_f: vec![0.0, 0.0, 0.0],
             commands: Vec::new(),
+            alarms: vec![(102, 2, 3, "'Танк 2' - не включена операция 1 'Мойка'".into())],
+            alarms_id: 50,
         }
+    }
+
+    /// Ответ 103 в виде ptusa: таблица присваивается дважды, описание не экранируется.
+    fn alarms_text(&self) -> String {
+        let mut s = String::from("alarms[ 0 ] = \n  {}alarms[ 0 ] = \n  {");
+        for (t, n, a, text) in &self.alarms {
+            s += &format!(
+                "\t{{\n\tdescription=\"{text}\",\n\tgroup=\"ответ\",\npriority=750,state=1,\ntype=4,\nid_n={n},\n\
+                 id_object_alarm_number={a},\nid_type={t},\nsuppress=false\n}},\n"
+            );
+        }
+        s + &format!("  id = {},\n  }}\n", self.alarms_id)
+    }
+
+    /// Команда 104: `errors_manager:get_instance():set_cmd( cmd, type, n, alarm )`.
+    fn alarm_cmd(&mut self, cmd: &str) -> u16 {
+        self.commands.push(cmd.to_string());
+        let Some(args) = cmd.strip_prefix("errors_manager:get_instance():set_cmd( ").and_then(|r| r.strip_suffix(" )"))
+        else {
+            return 1;
+        };
+        let args: Vec<i32> = args.split(", ").filter_map(|a| a.parse().ok()).collect();
+        let [_, t, n, a] = args[..] else { return 1 };
+        if t == 999 {
+            return 1;
+        }
+        let before = self.alarms.len();
+        self.alarms.retain(|(at, an, aa, _)| (*at, *an, *aa) != (t, n, a));
+        if self.alarms.len() != before {
+            self.alarms_id += 1;
+        }
+        0
     }
 
     fn snapshot(&self) -> String {
@@ -148,6 +186,12 @@ async fn serve(mut s: TcpStream, state: Arc<Mutex<PacState>>) -> std::io::Result
                 b.push(0);
                 b
             }
+            103 => {
+                let mut b = state.lock().unwrap().alarms_text().into_bytes();
+                b.push(0);
+                b
+            }
+            104 => state.lock().unwrap().alarm_cmd(&String::from_utf8_lossy(extra)).to_le_bytes().to_vec(),
             _ => state.lock().unwrap().apply(&String::from_utf8_lossy(extra)).to_le_bytes().to_vec(),
         };
         let packed = deflate(&body);
@@ -238,6 +282,13 @@ impl Stand {
             &security,
         )
         .unwrap();
+        let alarm_bridge = AlarmBridge {
+            pac: client.sibling(),
+            pusher: pusher.clone(),
+            reader: AlarmsReader::new().unwrap(),
+            poll: Duration::from_millis(100),
+            stats: stats.clone(),
+        };
         let bridge = Bridge {
             channels: channels.clone(),
             pac: client,
@@ -251,6 +302,7 @@ impl Stand {
                 let _ = server.run().await;
             }),
             tokio::spawn(bridge.run()),
+            tokio::spawn(alarm_bridge.run()),
         ];
         tokio::time::sleep(Duration::from_millis(800)).await;
         let session = match login {
@@ -285,6 +337,44 @@ impl Stand {
             value: DataValue::value_only(value),
         };
         session.write(&[w]).await.unwrap().remove(0)
+    }
+
+    /// Узел `SYSTEM.ALARMS`: разобранный JSON, статус и метка времени источника.
+    async fn alarms(&self) -> (Option<serde_json::Value>, StatusCode, Option<DateTime>) {
+        let rv = ReadValueId::from(self.node("SYSTEM.ALARMS"));
+        let dv: DataValue = self.session.read(&[rv], TimestampsToReturn::Both, 0.0).await.unwrap().remove(0);
+        let json = match dv.value {
+            Some(Variant::String(s)) => Some(serde_json::from_str(s.as_ref()).unwrap()),
+            _ => None,
+        };
+        (json, dv.status.unwrap_or(StatusCode::Good), dv.source_timestamp)
+    }
+
+    /// Ждать, пока статус узла `SYSTEM.ALARMS` станет `want`.
+    async fn wait_alarms_status(&self, want: StatusCode) {
+        for _ in 0..60 {
+            if self.alarms().await.1 == want {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("статус SYSTEM.ALARMS не стал {want:?}: {:?}", self.alarms().await);
+    }
+
+    /// Вызов метода `SYSTEM.ALARM_CMD`; статус вызова.
+    async fn alarm_cmd_on(&self, session: &Session, args: Vec<Variant>) -> StatusCode {
+        let call = (self.node("SYSTEM"), self.node("SYSTEM.ALARM_CMD"), Some(args));
+        session.call_one(call).await.unwrap().status_code
+    }
+
+    async fn alarm_cmd(&self, action: &str, object_type: i32, object_number: i32, alarm: i32) -> StatusCode {
+        let args = vec![
+            Variant::from(action),
+            Variant::Int32(object_type),
+            Variant::Int32(object_number),
+            Variant::Int32(alarm),
+        ];
+        self.alarm_cmd_on(&self.session, args).await
     }
 
     fn commands(&self) -> Vec<String> {
@@ -559,6 +649,59 @@ async fn writes_during_fast_polling_do_not_freeze_the_server() {
     .expect("тест завис");
 }
 
+/// Аварии прошивки: список — JSON в узле `SYSTEM.ALARMS` (меняется только вместе со списком), действие — метод
+/// `SYSTEM.ALARM_CMD` командой 104; неразобранный ответ и обрыв — плохой статус узла, а не старый список.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alarms_are_read_and_commanded() {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let mut s = Stand::start().await;
+        s.wait_alarms_status(StatusCode::Good).await;
+        let (json, _, ts) = s.alarms().await;
+        assert_eq!(
+            json.unwrap(),
+            serde_json::json!({"id": 50, "alarms": [{
+                "objectType": 102, "objectNumber": 2, "alarmNumber": 3, "critical": false,
+                "description": "'Танк 2' - не включена операция 1 'Мойка'", "group": "ответ", "priority": 750,
+                "state": "ALARM", "suppressed": false
+            }]})
+        );
+        // Список не менялся — узел не переписывается (подписка не получает одно и то же).
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(s.alarms().await.2, ts, "узел переписан без изменения списка");
+
+        // Квитирование: команда 104 только из чисел, сообщение уходит из списка.
+        assert_eq!(s.alarm_cmd("ACCEPT", 102, 2, 3).await, StatusCode::Good);
+        assert_eq!(s.commands(), ["errors_manager:get_instance():set_cmd( 100, 102, 2, 3 )"]);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(s.alarms().await.0.unwrap(), serde_json::json!({"id": 51, "alarms": []}));
+        // Повтор — прошивка молча ничего не делает; ошибка Lua — BadInvalidState; неизвестное действие в прошивку не идёт.
+        assert_eq!(s.alarm_cmd("SUPPRESS", 102, 2, 3).await, StatusCode::Good);
+        assert_eq!(s.alarm_cmd("ACCEPT", 999, 1, 1).await, StatusCode::BadInvalidState);
+        assert_eq!(s.alarm_cmd("DELETE", 102, 2, 3).await, StatusCode::BadInvalidArgument);
+        let wrong_type = vec![Variant::from("ACCEPT"), Variant::from("102"), Variant::Int32(2), Variant::Int32(3)];
+        assert_eq!(s.alarm_cmd_on(&s.session, wrong_type).await, StatusCode::BadInvalidArgument);
+        assert_eq!(s.commands().len(), 3, "{:?}", s.commands());
+
+        // Кавычка в описании (прошивка её не экранирует) — ответ не разобран: плохой статус, а не прежний список.
+        s.pac_state.lock().unwrap().alarms.push((102, 1, 4, "нет сигнала \"Линия свободна\"".into()));
+        s.wait_alarms_status(StatusCode::BadDecodingError).await;
+        s.pac_state.lock().unwrap().alarms[0].3 = "нет сигнала 'Линия свободна'".into();
+        s.wait_alarms_status(StatusCode::Good).await;
+        assert_eq!(s.alarms().await.0.unwrap()["alarms"][0]["alarmNumber"], 4);
+
+        // Обрыв связи — BadCommunicationError, метод тоже; прошивка вернулась — список снова читается.
+        s.pac.stop();
+        s.wait_alarms_status(StatusCode::BadCommunicationError).await;
+        assert_eq!(s.alarm_cmd("ACCEPT", 102, 1, 4).await, StatusCode::BadCommunicationError);
+        let (port, state) = (s.pac.port, s.pac_state.clone());
+        s.pac = FakePac::start(port, state).await;
+        s.wait_alarms_status(StatusCode::Good).await;
+        assert!(s.stats.alarm_polls.load(std::sync::atomic::Ordering::Relaxed) > 5);
+    })
+    .await
+    .expect("сценарий не уложился в 90 с");
+}
+
 // ------------------------------------------------------------------------ защита --
 
 const SIGN_ENCRYPT: MessageSecurityMode = MessageSecurityMode::SignAndEncrypt;
@@ -614,6 +757,9 @@ async fn secured_facade_requires_a_password_a_trusted_certificate_and_the_write_
         let dv = boris.read(&[rv], TimestampsToReturn::Both, 0.0).await.unwrap().remove(0);
         assert_eq!(dv.status.unwrap_or(StatusCode::Good), StatusCode::Good);
         assert_eq!(s.write_on(&boris, "LINE1V0.M", Variant::Int32(0)).await, StatusCode::BadUserAccessDenied);
+        // Действие над аварией — тоже команда: роли read нельзя.
+        let accept = vec![Variant::from("ACCEPT"), Variant::Int32(102), Variant::Int32(2), Variant::Int32(3)];
+        assert_eq!(s.alarm_cmd_on(&boris, accept).await, StatusCode::BadUserAccessDenied);
 
         // Анонимный вход, неверный пароль и неизвестный пользователь отклонены.
         assert!(try_connect(s.port, POLICY, SIGN_ENCRYPT, IdentityToken::Anonymous, Some(&s.pki)).await.is_none());
@@ -626,6 +772,7 @@ async fn secured_facade_requires_a_password_a_trusted_certificate_and_the_write_
 
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(s.commands(), ["__LINE1V0:set_cmd('M', 1, 1)"], "в прошивку ушла только команда роли write");
+        assert_eq!(s.alarm_cmd("ACCEPT", 102, 2, 3).await, StatusCode::Good, "роли write — можно");
     })
     .await
     .expect("тест завис");
