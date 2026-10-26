@@ -35,7 +35,7 @@ use tracing::{info, warn};
 pub enum Role {
     /// Только чтение.
     Read,
-    /// Чтение и запись (команды прошивке).
+    /// Чтение, запись и действия над авариями (команды прошивке).
     Write,
 }
 
@@ -384,6 +384,11 @@ impl AuthManager for Gate {
             Some(Role::Read) => level - AccessLevel::CURRENT_WRITE,
             _ => level,
         }
+    }
+
+    fn is_user_executable(&self, token: &UserToken, _method: &NodeId) -> bool {
+        // Метод фасада один — действие над аварией прошивки; это команда, как и запись: роли `read` нельзя.
+        self.role(token) != Some(Role::Read)
     }
 
     fn user_token_policies(&self, endpoint: &ServerEndpoint) -> Vec<opcua::types::UserTokenPolicy> {

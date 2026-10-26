@@ -15,8 +15,11 @@
 //!   всех узлов (сам OPC UA-сервер при этом жив — как у настоящего ПЛК с отвалившейся шиной);
 //! * запись клиента в узел — команда прошивке `__<прибор>:set_cmd('<поле>', <индекс>, <значение>)` ДО
 //!   сохранения значения; клиент получает её исход: код 0 — `Good`, иначе `BadInvalidState`, нет связи
-//!   — `BadCommunicationError`. Узел без `writable` — запись отклоняется сервером.
+//!   — `BadCommunicationError`. Узел без `writable` — запись отклоняется сервером;
+//! * аварии прошивки (GET_PAC_ERRORS, 103) — JSON-список в узле `SYSTEM.ALARMS`, действие над аварией —
+//!   метод `SYSTEM.ALARM_CMD` (SET_PAC_ERROR_CMD, 104), см. `alarms`.
 
+pub mod alarms;
 pub mod channel;
 pub mod pac;
 pub mod protocol;

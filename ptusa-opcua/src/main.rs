@@ -17,6 +17,7 @@
 //!   OPCUA_SECURITY, OPCUA_USERS_FILE, OPCUA_ALLOW_ANONYMOUS, OPCUA_PKI_DIR, OPCUA_TRUST_ALL_CLIENTS, OPCUA_CERT_DAYS,
 //!                        OPCUA_CERT_HOSTS — защита фасада, см. `ptusa_opcua::security`; без них фасад не стартует
 //!   POLL_MS              период снимка, по умолчанию 500
+//!   ALARMS_POLL_MS       период чтения списка аварий прошивки (узел `SYSTEM.ALARMS`), по умолчанию 300
 //!   RUST_LOG             уровни журнала
 
 use std::path::PathBuf;
@@ -24,10 +25,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use ptusa_opcua::alarms::AlarmsReader;
 use ptusa_opcua::channel::load_channels;
 use ptusa_opcua::pac::PacClient;
 use ptusa_opcua::security::{Security, hash_password};
-use ptusa_opcua::server::{Bridge, Stats, build, parse_bind};
+use ptusa_opcua::server::{AlarmBridge, Bridge, Stats, build, parse_bind};
 use ptusa_opcua::snapshot::Snapshot;
 use tracing::{info, warn};
 
@@ -74,6 +76,7 @@ async fn main() -> Result<()> {
 
     let channels = Arc::new(load_channels(&PathBuf::from(env("STATION_CONFIG", "/config/station.yaml")))?);
     let poll_ms: u64 = env("POLL_MS", "500").parse().context("POLL_MS")?;
+    let alarms_poll_ms: u64 = env("ALARMS_POLL_MS", "300").parse().context("ALARMS_POLL_MS")?;
     let pac = Arc::new(pac_client()?);
     let stats = Arc::new(Stats::default());
     let announce = env("OPCUA_ENDPOINT", "opc.tcp://localhost:4840");
@@ -88,8 +91,18 @@ async fn main() -> Result<()> {
         }
     }
     let (server, pusher) = build(&channels, pac.clone(), stats.clone(), &announce, bind.clone(), &security)?;
-    info!("OPC UA на {}:{}, прошивка {}:{}, снимок раз в {poll_ms} мс", bind.0, bind.1, pac.host, pac.port);
+    info!(
+        "OPC UA на {}:{}, прошивка {}:{}, снимок раз в {poll_ms} мс, аварии раз в {alarms_poll_ms} мс",
+        bind.0, bind.1, pac.host, pac.port
+    );
 
+    let alarm_bridge = AlarmBridge {
+        pac: pac.sibling(),
+        pusher: pusher.clone(),
+        reader: AlarmsReader::new()?,
+        poll: Duration::from_millis(alarms_poll_ms),
+        stats: stats.clone(),
+    };
     let bridge =
         Bridge { channels, pac, pusher, snapshot: Snapshot::new()?, poll: Duration::from_millis(poll_ms), stats };
     let server_task = tokio::spawn(async move {
@@ -98,8 +111,10 @@ async fn main() -> Result<()> {
         }
     });
     let bridge_task = tokio::spawn(bridge.run());
+    let alarms_task = tokio::spawn(alarm_bridge.run());
     shutdown_signal().await;
     info!("Останавливаю фасад");
+    alarms_task.abort();
     bridge_task.abort();
     server_task.abort();
     Ok(())
