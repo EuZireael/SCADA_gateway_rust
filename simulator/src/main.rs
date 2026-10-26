@@ -12,6 +12,7 @@
 //! конфигурации), MODBUS_PORT, PAC_PORT, RUST_LOG; SIM_OPCUA_USER и SIM_OPCUA_PASSWORD — включить
 //! защищённые конечные точки (Basic256Sha256) для этого пользователя.
 
+mod alarms;
 mod config;
 mod conformance;
 mod luatab;
@@ -236,6 +237,9 @@ fn spawn_cycle(
             let out = plc.cycle(&regs);
             if let Some(pusher) = &pusher {
                 pusher.push(&out.opcua);
+                if let Some(json) = plc.alarms.take_changed() {
+                    pusher.push_alarms(&json);
+                }
             }
             if let Some(pac) = &pac {
                 let snapshot: HashMap<String, value::Value> = out.pac;

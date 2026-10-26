@@ -27,6 +27,8 @@ pub struct Plc {
     replay: Option<Replay>,
     /// Запись оператора: цикл не ждёт конца периода, а обновляет узлы сразу.
     pub wake: Notify,
+    /// Аварии прошивки (узел `SYSTEM.ALARMS` OPC UA-сервера).
+    pub alarms: crate::alarms::Alarms,
 }
 
 /// Изменяемая часть ПЛК под мьютексом.
@@ -124,6 +126,7 @@ impl Plc {
             state: Mutex::new(State { tags, by_address, modbus_pushed: HashMap::new(), opcua_pushed, requires }),
             replay,
             wake: Notify::new(),
+            alarms: Default::default(),
         })
     }
 

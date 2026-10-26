@@ -22,8 +22,8 @@ pub struct ControllersSection {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerConfig {
-    /// Идентификатор из YAML; не используется, разбирается для совместимости формата.
-    #[allow(dead_code)] // id разбирается для совместимости формата с Java-шлюзом
+    /// Идентификатор из YAML (формат Java-шлюза): ключ снимка аварий ПЛК в Kafka и `controllerId` команды квитирования;
+    /// не задан — вместо него `name`.
     pub id: Option<String>,
     /// Уникальное имя контроллера; по нему он связывается с таблицей `controllers`.
     pub name: String,
@@ -42,6 +42,8 @@ pub struct ServerConfig {
     pub enabled: bool,
     /// Чем контроллер называет себя; сверяется при каждом подключении (см. [`IdentityConfig`]).
     pub identity: Option<IdentityConfig>,
+    /// Путь проекта в мониторе для снимка аварий ПЛК (`path`); не задан — общий префикс имён тегов.
+    pub alarms_path: Option<String>,
     /// Теги контроллера.
     #[serde(default)]
     pub tags: Vec<TagConfig>,

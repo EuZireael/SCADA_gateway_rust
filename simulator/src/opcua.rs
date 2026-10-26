@@ -3,18 +3,19 @@
 //! Адресное пространство — как у настоящего ПЛК: на прибор объект с переменными-полями (LINE1V0 →
 //! {ST, M}). NodeId поля — `ns=2;s=<address тега>`, поэтому привязка шлюза к базе каналов не
 //! зависит от иерархии. Состояние тегов ведёт [`Plc`]; узлы получают только изменившиеся значения.
-//! Запись клиента приходит в [`Plc::opcua_write`] (RO-узлы не записываемы вовсе).
+//! Запись клиента приходит в [`Plc::opcua_write`] (RO-узлы не записываемы вовсе). Аварии — как у фасада ptusa-opcua:
+//! узел `SYSTEM.ALARMS` и метод `SYSTEM.ALARM_CMD`, см. [`crate::alarms`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use opcua::crypto::SecurityPolicy;
-use opcua::server::address_space::{ObjectBuilder, VariableBuilder};
+use opcua::server::address_space::{MethodBuilder, ObjectBuilder, VariableBuilder};
 use opcua::server::diagnostics::NamespaceMetadata;
 use opcua::server::node_manager::memory::{SimpleNodeManager, simple_node_manager};
 use opcua::server::{Server, ServerBuilder, ServerHandle, ServerUserToken};
-use opcua::types::{DataTypeId, DataValue, MessageSecurityMode, NodeId, ObjectId, StatusCode, Variant};
+use opcua::types::{Argument, DataTypeId, DataValue, MessageSecurityMode, NodeId, ObjectId, StatusCode, Variant};
 use tracing::info;
 
 use crate::plc::{Plc, WriteError};
@@ -183,7 +184,30 @@ fn populate(plc: &Plc, manager: &SimpleNodeManager, ns: u16) -> Populated {
     VariableBuilder::new(&NodeId::new(ns, "SYSTEM.LINK_OK"), "LINK_OK", "LINK_OK")
         .data_type(DataTypeId::Boolean)
         .value(Variant::Boolean(true))
-        .organized_by(system)
+        .organized_by(system.clone())
+        .insert(&mut *space);
+    VariableBuilder::new(&NodeId::new(ns, "SYSTEM.ALARMS"), "ALARMS", "ALARMS")
+        .data_type(DataTypeId::String)
+        .value(Variant::from(""))
+        .organized_by(system.clone())
+        .insert(&mut *space);
+    VariableBuilder::new(&NodeId::new(ns, "SYSTEM.ALARM_RAISE"), "ALARM_RAISE", "ALARM_RAISE")
+        .data_type(DataTypeId::Int32)
+        .value(Variant::Int32(0))
+        .writable()
+        .organized_by(system.clone())
+        .insert(&mut *space);
+    let args: [Argument; 4] = [
+        ("Action", DataTypeId::String).into(),
+        ("ObjectType", DataTypeId::Int32).into(),
+        ("ObjectNumber", DataTypeId::Int32).into(),
+        ("AlarmNumber", DataTypeId::Int32).into(),
+    ];
+    MethodBuilder::new(&NodeId::new(ns, "SYSTEM.ALARM_CMD"), "ALARM_CMD", "ALARM_CMD")
+        .component_of(system)
+        .input_args(&mut *space, &NodeId::new(ns, "SYSTEM.ALARM_CMD.InputArguments"), &args)
+        .executable(true)
+        .user_executable(true)
         .insert(&mut *space);
     Populated { variables: types.len(), types, devices }
 }
@@ -204,6 +228,29 @@ fn add_write_callbacks(plc: &Arc<Plc>, manager: &SimpleNodeManager, ns: u16) {
     }
 }
 
+/// Аварии: запись номера объекта в `SYSTEM.ALARM_RAISE` заводит сообщение, метод `SYSTEM.ALARM_CMD` — команда над ним.
+/// Узел `SYSTEM.ALARMS` обновляет цикл (обработчик записи работает под блокировкой адресного пространства).
+fn add_alarm_callbacks(plc: &Arc<Plc>, manager: &SimpleNodeManager, ns: u16) {
+    let raise = plc.clone();
+    manager.inner().add_write_callback(NodeId::new(ns, "SYSTEM.ALARM_RAISE"), move |dv: DataValue, _range| {
+        let Some(Variant::Int32(object)) = dv.value else { return StatusCode::BadTypeMismatch };
+        raise.alarms.raise(object);
+        raise.wake.notify_one();
+        StatusCode::Good
+    });
+    let cmd = plc.clone();
+    manager.inner().add_method_callback(NodeId::new(ns, "SYSTEM.ALARM_CMD"), move |args: &[Variant]| {
+        let [Variant::String(action), Variant::Int32(t), Variant::Int32(n), Variant::Int32(a)] = args else {
+            return Err(StatusCode::BadInvalidArgument);
+        };
+        if !cmd.alarms.command(action.as_ref(), *t, *n, *a) {
+            return Err(StatusCode::BadInvalidArgument);
+        }
+        cmd.wake.notify_one();
+        Ok(Vec::new())
+    });
+}
+
 /// Собирает сервер с адресным пространством из тегов контроллера. Сервер надо запустить (`run`).
 pub fn build(plc: &Arc<Plc>, endpoint: &str, user: Option<(&str, &str)>) -> Result<(Server, Pusher)> {
     let (host, port) = parse_endpoint(endpoint)?;
@@ -221,11 +268,21 @@ pub fn build(plc: &Arc<Plc>, endpoint: &str, user: Option<(&str, &str)>) -> Resu
 
     let populated = populate(plc, &manager, ns);
     add_write_callbacks(plc, &manager, ns);
+    add_alarm_callbacks(plc, &manager, ns);
     info!("OPC UA: {} переменных в {} приборах, {host}:{port}", populated.variables, populated.devices);
     Ok((server, Pusher { handle, manager, ns, types: populated.types }))
 }
 
 impl Pusher {
+    /// Список аварий (JSON) — в узел `SYSTEM.ALARMS`.
+    pub fn push_alarms(&self, json: &str) {
+        let id = NodeId::new(self.ns, "SYSTEM.ALARMS");
+        let _ = self.manager.set_values(
+            self.handle.subscriptions(),
+            [(&id, None, DataValue::new_now(Variant::from(json)))].into_iter(),
+        );
+    }
+
     /// Положить в узлы изменившиеся значения.
     pub fn push(&self, changes: &[(String, Value)]) {
         if changes.is_empty() {

@@ -1,5 +1,6 @@
 //! Команды записи из `scada-commands`: очередь своего контроллера, маршрутизация по протоколу, права, приведение
-//! типа, запись в ПЛК и результат в `scada-command-results`. Статусы — как у Java-шлюза.
+//! типа, запись в ПЛК и результат в `scada-command-results`. Статусы — как у Java-шлюза. Команда с `type: "PAC_ALARM"` —
+//! действие над аварией ПЛК ([`crate::pac_alarms`]) в той же очереди контроллера.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -11,13 +12,14 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::app::{App, TagRef};
+use crate::app::{App, ControllerHandle, TagRef};
 use crate::events::Event;
 use crate::messages::{CommandMessage, CommandResultMessage, command_age_ms};
 use crate::metrics::Metrics;
 use crate::model::{self, Protocol, Quality, TagValue, Timestamp};
 use crate::opcua::{self, NodeId};
 use crate::pac::lua;
+use crate::pac_alarms;
 
 /// Исход команды.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,7 +53,7 @@ impl Outcome {
     }
 
     /// Отказ или сбой: статус и пояснение, записанного значения нет.
-    fn fail(status: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn fail(status: &'static str, message: impl Into<String>) -> Self {
         Outcome { status, message: message.into(), applied: None }
     }
 
@@ -112,8 +114,43 @@ fn resolve(app: &App, cmd: &CommandMessage) -> Result<TagRef, String> {
     }
 }
 
+/// Вид команды по полю `type`.
+enum Kind {
+    /// Нет `type` или `TAG_WRITE`: запись тега (так шлёт и прежний монитор).
+    TagWrite,
+    /// `PAC_ALARM`: действие над аварией ПЛК.
+    PacAlarm,
+    /// Иное: `REJECTED_INVALID`, пояснение — что пришло.
+    Unknown(String),
+}
+
+fn kind(cmd: &CommandMessage) -> Kind {
+    match &cmd.kind {
+        Value::Null => Kind::TagWrite,
+        Value::String(s) if s == "TAG_WRITE" => Kind::TagWrite,
+        Value::String(s) if s == "PAC_ALARM" => Kind::PacAlarm,
+        other => Kind::Unknown(format!("Неизвестный вид команды type = {other}")),
+    }
+}
+
+/// Контроллер команды `PAC_ALARM`; `Err` — исход, команда до ПЛК не доходит.
+fn alarm_target(app: &App, cmd: &CommandMessage) -> Result<(Arc<ControllerHandle>, pac_alarms::AlarmCommand), Outcome> {
+    let alarm = pac_alarms::parse_command(cmd).map_err(|m| Outcome::fail("REJECTED_INVALID", m))?;
+    Ok((pac_alarms::controller(app, &alarm.controller_id)?, alarm))
+}
+
 /// Выполнить команду.
 pub async fn execute(app: &App, cmd: &CommandMessage) -> Outcome {
+    match kind(cmd) {
+        Kind::TagWrite => {}
+        Kind::PacAlarm => {
+            return match alarm_target(app, cmd) {
+                Ok((controller, alarm)) => pac_alarms::execute(&controller, &alarm).await,
+                Err(outcome) => outcome,
+            };
+        }
+        Kind::Unknown(msg) => return Outcome::fail("REJECTED_INVALID", msg),
+    }
     let TagRef { tag, controller } = match resolve(app, cmd) {
         Ok(r) => r,
         Err(msg) => return Outcome::fail("REJECTED_UNKNOWN_TAG", msg),
@@ -440,9 +477,27 @@ impl Dispatcher {
     }
 }
 
-/// Имя тега команды для журнала: `tagName`, иначе `#tagId`.
+/// Имя тега команды для журнала: `tagName`, иначе `#tagId`; у `PAC_ALARM` — авария и контроллер.
 fn tag_label(cmd: &CommandMessage) -> String {
+    if let Kind::PacAlarm = kind(cmd) {
+        let n = |v: &Value| if v.is_null() { "?".to_string() } else { v.to_string() };
+        return format!(
+            "аварии {}:{}:{} контроллера {}",
+            n(&cmd.object_type),
+            n(&cmd.object_number),
+            n(&cmd.alarm_number),
+            cmd.controller_id.as_str().unwrap_or("?")
+        );
+    }
     cmd.tag_name.clone().or_else(|| cmd.tag_id.map(|id| format!("#{id}"))).unwrap_or_else(|| "?".into())
+}
+
+/// Что делает команда, для журнала: значение записи или действие над аварией.
+fn what(cmd: &CommandMessage) -> String {
+    match kind(cmd) {
+        Kind::PacAlarm => cmd.action.as_str().map_or_else(|| cmd.action.to_string(), str::to_string),
+        _ => cmd.value.to_string(),
+    }
 }
 
 /// Принять команду из топика (вызывается по порядку топика): повтор — пропуск, тег не найден — ответ сразу, иначе —
@@ -454,10 +509,17 @@ pub fn submit(app: &App, dedup: &Dedup, queues: &Dispatcher, cmd: CommandMessage
         warn!("⏭ Команда {id} уже обработана недавно — пропуск");
         return;
     }
-    info!("← команда: {} = {}, от {}", tag_label(&cmd), cmd.value, cmd.requested_by.as_deref().unwrap_or("?"));
-    let controller = match resolve(app, &cmd) {
-        Ok(TagRef { controller, .. }) => controller,
-        Err(msg) => return finish(app, &cmd, Outcome::fail("REJECTED_UNKNOWN_TAG", msg)),
+    info!("← команда: {} = {}, от {}", tag_label(&cmd), what(&cmd), cmd.requested_by.as_deref().unwrap_or("?"));
+    let controller = match kind(&cmd) {
+        Kind::TagWrite => resolve(app, &cmd)
+            .map(|TagRef { controller, .. }| controller)
+            .map_err(|msg| Outcome::fail("REJECTED_UNKNOWN_TAG", msg)),
+        Kind::PacAlarm => alarm_target(app, &cmd).map(|(controller, _)| controller),
+        Kind::Unknown(msg) => Err(Outcome::fail("REJECTED_INVALID", msg)),
+    };
+    let controller = match controller {
+        Ok(controller) => controller,
+        Err(outcome) => return finish(app, &cmd, outcome),
     };
     if let Err(job) = queues.enqueue(&controller.ctrl.name, Job::new(cmd, record_timestamp_ms)) {
         let msg = format!("Нет очереди команд контроллера {}", controller.ctrl.name);
@@ -490,7 +552,7 @@ pub async fn process(app: &App, job: Job) {
     finish(app, cmd, outcome);
 }
 
-/// Исход команды — в метрику, журнал, `scada-command-results` и событие `COMMAND`.
+/// Исход команды — в метрику, журнал, `scada-command-results` и событие `COMMAND` (у `PAC_ALARM` — `PAC_ALARM_COMMAND`).
 fn finish(app: &App, cmd: &CommandMessage, outcome: Outcome) {
     app.metrics.commands.with_label_values(&[outcome.status]).inc();
     if !outcome.success() {
@@ -502,11 +564,12 @@ fn finish(app: &App, cmd: &CommandMessage, outcome: Outcome) {
             outcome.message
         );
     }
+    let alarm = matches!(kind(cmd), Kind::PacAlarm);
     if let Some(kafka) = &app.kafka {
         kafka.send_result(&CommandResultMessage {
             command_id: cmd.command_id.clone(),
             tag_id: cmd.tag_id,
-            tag_name: cmd.tag_name.clone(),
+            tag_name: if alarm { alarm_result_name(app, cmd) } else { cmd.tag_name.clone() },
             status: outcome.status,
             success: outcome.success(),
             message: outcome.message.clone(),
@@ -514,16 +577,43 @@ fn finish(app: &App, cmd: &CommandMessage, outcome: Outcome) {
             timestamp: Timestamp::now(),
         });
     }
-    app.events.emit(
+    let severity = if outcome.success() { "INFO" } else { "WARNING" };
+    let requested_by = cmd.requested_by.as_deref().unwrap_or("?");
+    let event = if alarm {
+        Event::new(
+            "PAC_ALARM_COMMAND",
+            "CommandConsumer",
+            severity,
+            format!("Команда {} по {} от {requested_by}: {}", what(cmd), tag_label(cmd), outcome.status),
+        )
+        .details(json!({
+            "controllerId": cmd.controller_id, "action": cmd.action, "objectType": cmd.object_type,
+            "objectNumber": cmd.object_number, "alarmNumber": cmd.alarm_number, "requestedBy": cmd.requested_by,
+            "status": outcome.status,
+        }))
+    } else {
         Event::new(
             "COMMAND",
             "CommandConsumer",
-            if outcome.success() { "INFO" } else { "WARNING" },
-            format!("Команда {} = {} от {}: {}", cmd.tag_name.as_deref().unwrap_or("?"), cmd.value,
-                    cmd.requested_by.as_deref().unwrap_or("?"), outcome.status),
+            severity,
+            format!("Команда {} = {} от {requested_by}: {}", cmd.tag_name.as_deref().unwrap_or("?"), cmd.value,
+                    outcome.status),
         )
-        .details(json!({"tagId": cmd.tag_id, "value": cmd.value.to_string(), "requestedBy": cmd.requested_by, "status": outcome.status})),
-    );
+        .details(json!({"tagId": cmd.tag_id, "value": cmd.value.to_string(), "requestedBy": cmd.requested_by, "status": outcome.status}))
+    };
+    app.events.emit(event);
+}
+
+/// `tagName` результата `PAC_ALARM` — путь проекта контроллера (как `path` снимка); контроллер без пути — его id из
+/// команды. Контроллер не найден — id из команды, не строка — нет имени (ключ записи тогда `commandId`).
+fn alarm_result_name(app: &App, cmd: &CommandMessage) -> Option<String> {
+    let id = cmd.controller_id.as_str()?;
+    let path = app
+        .controllers
+        .iter()
+        .find(|h| pac_alarms::controller_id(&h.ctrl) == id)
+        .and_then(|h| pac_alarms::path(&h.ctrl));
+    Some(path.unwrap_or_else(|| id.to_string()))
 }
 
 #[cfg(test)]
@@ -736,5 +826,160 @@ mod tests {
         assert!(!d.is_duplicate("b"));
         assert!(!d.is_duplicate("c")); // вытесняет "a"
         assert!(!d.is_duplicate("a"));
+    }
+
+    mod routing {
+        use super::*;
+        use crate::app::AppDeps;
+        use crate::config::{ServerConfig, Settings};
+        use crate::events;
+        use crate::kafka::KafkaOut;
+        use crate::leadership::Leadership;
+        use crate::model::Controller;
+        use crate::script::Scripts;
+
+        struct Rig {
+            app: Arc<App>,
+            kafka: Arc<KafkaOut>,
+            events_rx: mpsc::Receiver<Event>,
+            queues: Dispatcher,
+            dedup: Dedup,
+        }
+
+        fn controller(yaml: &str) -> Controller {
+            Controller::from_config(&serde_yaml_ng::from_str::<ServerConfig>(yaml).unwrap()).unwrap()
+        }
+
+        /// OPC UA-контроллер с `id` и PAC-контроллер; аварии ПЛК — по `alarms`.
+        fn rig(alarms: bool) -> Rig {
+            let mut settings = Settings::from_env().expect("настройки по умолчанию");
+            settings.gateway.pac_alarms_enabled = alarms;
+            let metrics = Arc::new(Metrics::new());
+            let leadership = Leadership::single("test".into(), metrics.ha_gauge("test"));
+            let kafka =
+                Arc::new(KafkaOut::new(&settings.kafka, metrics.clone(), leadership.clone()).expect("продюсер"));
+            let (events, events_rx) = events::channel(metrics.clone());
+            let tanks = controller(
+                "id: ptusa-танки\nname: Танки\nendpoint: opc.tcp://h:4840\nenabled: true\ntags:\n\
+                 - {name: BN1.TANKS.TANK1.ST, nodeId: \"ns=2;s=1\", dataType: INT32, enabled: true, writable: true}\n\
+                 - {name: BN1.TANKS.TANK2.ST, nodeId: \"ns=2;s=2\", dataType: INT32, enabled: true}\n",
+            );
+            let pac = controller(
+                "name: PAC\nendpoint: pac://h:10000\nenabled: true\ntags:\n\
+                 - {name: P.V1.ST, nodeId: V1.ST, dataType: INT32, enabled: true}\n",
+            );
+            let queues = Dispatcher::new(["Танки", "PAC"], &metrics);
+            let deps = AppDeps {
+                metrics,
+                kafka: Some(kafka.clone()),
+                events,
+                telemetry: None,
+                db: None,
+                leadership,
+                scripts: Scripts::none(),
+            };
+            let app = Arc::new(App::new(settings, deps, vec![tanks, pac]));
+            Rig { app, kafka, events_rx, queues, dedup: Dedup::new(Duration::from_secs(60), 100) }
+        }
+
+        impl Rig {
+            fn submit(&self, body: Value) {
+                submit(&self.app, &self.dedup, &self.queues, serde_json::from_value(body).unwrap(), None);
+            }
+
+            /// Результаты команд: (ключ записи, тело).
+            fn results(&self) -> Vec<(String, Value)> {
+                let topic = &self.app.settings.kafka.topics.command_results;
+                std::mem::take(&mut *self.kafka.captured.lock().unwrap())
+                    .into_iter()
+                    .filter(|(t, _, _)| t == topic)
+                    .map(|(_, key, body)| (key, serde_json::from_str(&body).unwrap()))
+                    .collect()
+            }
+        }
+
+        fn alarm(id: &str, controller: &str) -> Value {
+            json!({"commandId": id, "type": "PAC_ALARM", "controllerId": controller, "action": "ACCEPT",
+                   "objectType": 102, "objectNumber": 2, "alarmNumber": 3, "requestedBy": "оператор"})
+        }
+
+        #[tokio::test]
+        async fn pac_alarm_commands_are_checked_and_queued_to_their_controller() {
+            let mut r = rig(true);
+            let mut no_number = alarm("c1", "ptusa-танки");
+            no_number["alarmNumber"] = Value::Null;
+            r.submit(no_number);
+            r.submit(alarm("c2", "нет-такого"));
+            r.submit(alarm("c3", "PAC"));
+            r.submit(json!({"commandId": "c4", "type": "RESET", "tagName": "BN1.TANKS.TANK1.ST", "value": 1}));
+            let got: Vec<(String, String, String)> = r
+                .results()
+                .into_iter()
+                .map(|(key, b)| {
+                    (key, b["status"].as_str().unwrap().to_owned(), b["message"].as_str().unwrap().to_owned())
+                })
+                .collect();
+            // Ключ результата — путь проекта контроллера (общий префикс тегов), у неизвестного контроллера — id из
+            // команды; у команды неизвестного вида — как у записи: tagName из запроса.
+            assert_eq!((got[0].0.as_str(), got[0].1.as_str()), ("BN1.TANKS", "REJECTED_INVALID"));
+            assert!(got[0].2.contains("alarmNumber"), "{:?}", got[0]);
+            assert_eq!((got[1].0.as_str(), got[1].1.as_str()), ("нет-такого", "REJECTED_UNKNOWN_TAG"));
+            assert_eq!(
+                (got[2].0.as_str(), got[2].1.as_str()),
+                ("P.V1", "REJECTED_UNKNOWN_TAG"),
+                "аварии — только у OPC UA"
+            );
+            assert_eq!((got[3].0.as_str(), got[3].1.as_str()), ("BN1.TANKS.TANK1.ST", "REJECTED_INVALID"));
+            assert!(got[3].2.contains("RESET"), "{:?}", got[3]);
+            assert_eq!(got.len(), 4);
+            let events: Vec<String> =
+                std::iter::from_fn(|| r.events_rx.try_recv().ok()).map(|e| e.event_type).collect();
+            assert_eq!(events, ["PAC_ALARM_COMMAND", "PAC_ALARM_COMMAND", "PAC_ALARM_COMMAND", "COMMAND"]);
+
+            // Правильная команда встаёт в очередь своего контроллера; без сессии OPC UA — нет связи.
+            r.submit(alarm("c5", "ptusa-танки"));
+            assert!(r.results().is_empty(), "ждёт в очереди");
+            let cancel = CancellationToken::new();
+            let (app, stop) = (r.app.clone(), cancel.clone());
+            let worker = async move {
+                r.queues
+                    .run("Танки", &stop, |job| {
+                        let app = app.clone();
+                        let stop = stop.clone();
+                        async move {
+                            process(&app, job).await;
+                            stop.cancel();
+                        }
+                    })
+                    .await;
+                r
+            };
+            let r = tokio::time::timeout(Duration::from_secs(5), worker).await.expect("команда исполнена");
+            let done = r.results();
+            assert_eq!(done.len(), 1);
+            assert_eq!(done[0].0, "BN1.TANKS");
+            assert_eq!(done[0].1["status"], "FAILED_NO_CONNECTION");
+            assert_eq!(done[0].1["appliedValue"], Value::Null);
+            assert!(cancel.is_cancelled());
+        }
+
+        #[test]
+        fn tag_writes_keep_working_with_or_without_type() {
+            let r = rig(true);
+            r.submit(json!({"commandId": "w1", "tagName": "BN1.TANKS.TANK1.ST", "value": 1}));
+            r.submit(json!({"commandId": "w2", "type": "TAG_WRITE", "tagName": "BN1.TANKS.TANK1.ST", "value": 2}));
+            assert!(r.results().is_empty(), "обе записи в очереди контроллера");
+            r.submit(json!({"commandId": "w3", "type": "TAG_WRITE", "tagName": "нет", "value": 2}));
+            assert_eq!(r.results()[0].1["status"], "REJECTED_UNKNOWN_TAG");
+        }
+
+        #[test]
+        fn pac_alarm_commands_are_rejected_when_alarms_are_off() {
+            let r = rig(false);
+            r.submit(alarm("c1", "ptusa-танки"));
+            let got = r.results();
+            assert_eq!(got[0].1["status"], "REJECTED_UNKNOWN_TAG");
+            assert!(got[0].1["message"].as_str().unwrap().contains("GATEWAY_PAC_ALARMS_ENABLED"));
+        }
     }
 }

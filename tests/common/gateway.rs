@@ -51,6 +51,7 @@ impl Gateway {
             ("KAFKA_TOPICS_COMMAND_RESULTS", "results"),
             ("KAFKA_TOPICS_EVENTS", "events"),
             ("KAFKA_TOPICS_ALARMS", "alarms"),
+            ("KAFKA_TOPICS_PAC_ALARMS", "pac-alarms"),
         ] {
             cmd.env(var, format!("{prefix}.{suffix}"));
         }
@@ -186,7 +187,7 @@ impl Gateway {
     pub async fn delete_topics(&self) {
         let admin: AdminClient<DefaultClientContext> = kafka_config().create().unwrap();
         let topics: Vec<String> =
-            ["tags", "commands", "results", "events", "alarms"].iter().map(|s| self.topic(s)).collect();
+            ["tags", "commands", "results", "events", "alarms", "pac-alarms"].iter().map(|s| self.topic(s)).collect();
         let refs: Vec<&str> = topics.iter().map(String::as_str).collect();
         let _ = admin.delete_topics(&refs, &AdminOptions::new()).await;
     }

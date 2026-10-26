@@ -556,6 +556,15 @@ impl OpcConnection {
         statuses.into_iter().next().context("сервер не вернул статус записи")
     }
 
+    /// Вызвать метод `method` объекта `object` с аргументами; StatusCode — исход вызова на сервере.
+    pub async fn call(&self, object: NodeId, method: NodeId, args: Vec<Variant>) -> Result<StatusCode> {
+        let result = timeout(self.op_timeout, self.session.call_one((object, method, Some(args))))
+            .await
+            .context("таймаут вызова метода")?
+            .map_err(|e| anyhow!("{e}"))?;
+        Ok(result.status_code)
+    }
+
     /// Сверить контроллер с ожидаемым (`identity` в `controllers.yaml`): `ApplicationUri` сервера (первый элемент
     /// `Server.ServerArray`) и/или значение узла с именем контроллера. Несовпадение, непрочитанный узел — [`identity::Mismatch`];
     /// узел `nsu=` разбирается по таблице пространств имён, поэтому вызывать после [`Self::prepare`].
@@ -617,7 +626,7 @@ pub fn resolve_node_id(node_id: &str, namespaces: &[String]) -> Result<NodeId> {
 }
 
 /// Тот же код состояния без учёта младших битов (в них сервер кладёт подробности).
-fn same_status(a: StatusCode, b: StatusCode) -> bool {
+pub(crate) fn same_status(a: StatusCode, b: StatusCode) -> bool {
     a.bits() & 0xFFFF_0000 == b.bits() & 0xFFFF_0000
 }
 

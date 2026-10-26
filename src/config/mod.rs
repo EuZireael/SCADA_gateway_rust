@@ -43,6 +43,8 @@ pub struct KafkaSettings {
     pub publish_events: bool,
     /// Публиковать ли алармы в топик алармов.
     pub publish_alarms: bool,
+    /// Публиковать ли снимки аварий ПЛК в топик аварий PAC.
+    pub publish_pac_alarms: bool,
     /// Фактор репликации создаваемых шлюзом топиков (на стенде 1, на кластере — по числу брокеров).
     pub replication: i32,
     /// Свойства librdkafka для всех клиентов шлюза (безопасность: TLS, SASL) — см. [`client_properties`].
@@ -103,6 +105,8 @@ pub struct Topics {
     pub commands: String,
     /// Результаты команд (шлюз пишет).
     pub command_results: String,
+    /// Аварии ПЛК (ptusa): снимок списка по контроллеру, compact; ключ — id контроллера.
+    pub pac_alarms: String,
 }
 
 /// Флаги горячего пути (секция `gateway.*` Java-шлюза).
@@ -140,6 +144,10 @@ pub struct GatewaySettings {
     pub modbus_op_timeout: Duration,
     /// Таймаут одной операции PAC.
     pub pac_op_timeout: Duration,
+    /// Аварии ПЛК (узел `SYSTEM.ALARMS` OPC UA-фасада ptusa): читать и публиковать.
+    pub pac_alarms_enabled: bool,
+    /// Как часто читать список аварий контроллера.
+    pub pac_alarms_interval: Duration,
     /// Нет удачных чтений дольше — связь считается мёртвой, сессия пересоздаётся.
     pub stale_after: Duration,
     /// Пауза между попытками подключения.
@@ -246,6 +254,7 @@ impl KafkaSettings {
                 .unwrap_or_else(|| "localhost:9092".into()),
             publish_events: env_bool(&["KAFKA_PUBLISH_EVENTS"], true),
             publish_alarms: env_bool(&["KAFKA_PUBLISH_ALARMS"], true),
+            publish_pac_alarms: env_bool(&["KAFKA_PUBLISH_PAC_ALARMS"], true),
             replication: env_parse(&["KAFKA_TOPICS_REPLICATION"], 1)?,
             client: client_properties(std::env::vars()),
             topics: Topics {
@@ -257,6 +266,7 @@ impl KafkaSettings {
                     &["KAFKA_TOPICS_COMMAND_RESULTS", "KAFKA_TOPICS_COMMANDRESULTS"],
                     "scada-command-results",
                 ),
+                pac_alarms: env_or(&["KAFKA_TOPICS_PAC_ALARMS"], "scada.pac-alarms"),
             },
             tag_settings_topic: env_or(&["CHANNEL_TAG_SETTINGS_TOPIC"], "channel.tag-settings"),
             tag_settings_enabled: env_bool(&["GATEWAY_TAG_SETTINGS_ENABLED"], true),
@@ -269,6 +279,11 @@ impl KafkaSettings {
 impl GatewaySettings {
     /// `commands_topic` — от него по умолчанию зависит группа выборов резервирования.
     fn from_env(commands_topic: &str) -> Result<Self> {
+        let pac_alarms_interval = env_ms(&["GATEWAY_PAC_ALARMS_INTERVAL_MS"], 300)?;
+        ensure!(
+            !pac_alarms_interval.is_zero(),
+            "GATEWAY_PAC_ALARMS_INTERVAL_MS: 0 — чтобы не читать аварии, задайте GATEWAY_PAC_ALARMS_ENABLED=false"
+        );
         Ok(GatewaySettings {
             alarms_enabled: env_bool(&["GATEWAY_ALARMS_ENABLED"], false),
             persist_telemetry: env_bool(&["GATEWAY_PERSIST_TELEMETRY", "GATEWAY_PERSISTTELEMETRY"], false),
@@ -287,6 +302,8 @@ impl GatewaySettings {
             opcua_trust_server_certs: env_bool(&["GATEWAY_OPCUA_TRUST_SERVER_CERTS"], false),
             modbus_op_timeout: env_ms(&["GATEWAY_MODBUS_OP_TIMEOUT_MS", "GATEWAY_MODBUSOPTIMEOUTMS"], 3000)?,
             pac_op_timeout: env_ms(&["GATEWAY_PAC_OP_TIMEOUT_MS", "GATEWAY_PACOPTIMEOUTMS"], 3000)?,
+            pac_alarms_enabled: env_bool(&["GATEWAY_PAC_ALARMS_ENABLED"], true),
+            pac_alarms_interval,
             stale_after: env_ms(&["GATEWAY_STALE_AFTER_MS"], 30_000)?,
             reconnect_interval: env_ms(&["GATEWAY_SUPERVISE_INTERVAL_MS", "GATEWAY_SUPERVISEINTERVALMS"], 200)?,
             health_log_interval: env_ms(&["GATEWAY_HEALTH_LOG_INTERVAL_MS", "GATEWAY_HEALTHLOGINTERVALMS"], 60_000)?,

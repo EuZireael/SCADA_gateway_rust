@@ -176,6 +176,7 @@ async fn run() -> Result<()> {
     startup::spawn_pollers(&app, &mut tasks);
     startup::spawn_commands(&app, &leadership, &mut tasks);
     startup::spawn_tag_settings(&app, &mut tasks);
+    startup::spawn_pac_alarms(&app, station.disabled_alarm_ids, &mut tasks);
     startup::spawn_http(app, &mut tasks).await?;
 
     startup::shutdown_signal().await;
