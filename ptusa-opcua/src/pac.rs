@@ -1,8 +1,9 @@
 //! Клиент driver-master одной прошивки ptusa: одно TCP-соединение, запрос → ответ.
 //!
-//! Опрос (снимок) идёт по одному соединению и по очереди; команды записи клиента OPC UA — по своему, второму (см. `sibling`)
-//! в отдельном рантайме: их обработчик синхронный и не должен зависеть от драйвера ввода-вывода основного. Первый запрос шлём сразу после приветствия: ptusa рвёт соединение, если клиент
-//! молчит дольше ~300 мс.
+//! Опрос (снимок) идёт по одному соединению и по очереди; команды клиентов OPC UA (запись, действие над аварией) — по
+//! своему, второму (см. `sibling`) в отдельном рантайме: их обработчик синхронный и не должен зависеть от драйвера
+//! ввода-вывода основного; список аварий — по третьему, со своим периодом. Первый запрос шлём сразу после приветствия:
+//! ptusa рвёт соединение, если клиент молчит дольше ~300 мс.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -129,12 +130,20 @@ impl PacClient {
         Ok(lua_text(body.get(LUA_START_OFFSET..).unwrap_or_default()))
     }
 
-    /// EXEC_DEVICE_COMMAND: код результата прошивки (0 — применено, иначе команда не выполнилась;
-    /// соединение при этом живо). Err — сбой связи.
-    pub async fn command(&self, text: &str) -> Result<u16> {
+    /// GET_PAC_ERRORS: Lua-текст списка аварий (`alarms[ 0 ] = {…}`; в отличие от снимка — без devices_request_id).
+    pub async fn alarms(&self) -> Result<String> {
         let mut guard = self.conn.lock().await;
         let conn = guard.as_mut().context("PAC: нет соединения")?;
-        let body = self.request(conn, CMD_EXEC_DEVICE_COMMAND, text.as_bytes()).await?;
+        let body = self.request(conn, CMD_GET_PAC_ERRORS, &[0]).await?;
+        Ok(lua_text(&body))
+    }
+
+    /// Lua-команда прошивке: `cmd` — EXEC_DEVICE_COMMAND (прибору) или SET_PAC_ERROR_CMD (аварии). Код результата
+    /// прошивки: 0 — применено, иначе команда не выполнилась (соединение при этом живо). Err — сбой связи.
+    pub async fn command(&self, cmd: u8, text: &str) -> Result<u16> {
+        let mut guard = self.conn.lock().await;
+        let conn = guard.as_mut().context("PAC: нет соединения")?;
+        let body = self.request(conn, cmd, text.as_bytes()).await?;
         Ok(exec_result_code(&body))
     }
 
