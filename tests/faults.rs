@@ -17,7 +17,7 @@ use rdkafka::consumer::StreamConsumer;
 use rdkafka::message::Message;
 use serde_json::Value;
 
-use common::gateway::{Gateway, consumer_from_beginning};
+use common::gateway::{Gateway, consumer_from_beginning, recv_until};
 use common::proxy::{Mode, Proxy};
 
 /// Таймауты шлюза — короткие, чтобы обрыв замечался за секунды.
@@ -49,8 +49,7 @@ async fn await_frames(
     let mut pending: HashSet<&String> = tags.keys().collect();
     let deadline = Instant::now() + within;
     while !pending.is_empty() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let Ok(Ok(m)) = tokio::time::timeout(left, telemetry.recv()).await else { break };
+        let Some(m) = recv_until(telemetry, deadline).await else { break };
         if m.timestamp().to_millis().unwrap_or(0) < since_ms {
             continue;
         }
@@ -79,8 +78,7 @@ async fn await_link_events(
     let mut pending: HashSet<&String> = names.iter().collect();
     let deadline = Instant::now() + within;
     while !pending.is_empty() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let Ok(Ok(m)) = tokio::time::timeout(left, events.recv()).await else { break };
+        let Some(m) = recv_until(events, deadline).await else { break };
         if m.timestamp().to_millis().unwrap_or(0) < since_ms {
             continue;
         }

@@ -16,7 +16,7 @@ use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::{Value, json};
 
-use common::gateway::{Gateway, consumer_from_beginning, kafka_config};
+use common::gateway::{Gateway, consumer_from_beginning, kafka_config, recv_until};
 use common::proxy::{Mode, Proxy};
 use common::{OP_TIMEOUT, controller};
 use scada_gateway::model::ControllerKind;
@@ -56,12 +56,8 @@ async fn raise(object: i32) {
 async fn snapshot(gw: &Gateway, alarms: &StreamConsumer, id: &str, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        // Ошибка приёма (брокер только что поднялся) — не конец: консьюмер переподключается сам.
-        let m = match tokio::time::timeout(left, alarms.recv()).await {
-            Ok(Ok(m)) => m,
-            Ok(Err(_)) => continue,
-            Err(_) => panic!("нет снимка аварий: {what}\n{}", gw.log_tail()),
+        let Some(m) = recv_until(alarms, deadline).await else {
+            panic!("нет снимка аварий: {what}\n{}", gw.log_tail());
         };
         if m.key() != Some(id.as_bytes()) {
             continue;
@@ -92,11 +88,8 @@ async fn command(gw: &Gateway, producer: &FutureProducer, results: &StreamConsum
         .expect("команда");
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let m = match tokio::time::timeout(left, results.recv()).await {
-            Ok(Ok(m)) => m,
-            Ok(Err(_)) => continue,
-            Err(_) => panic!("нет результата команды {body}\n{}", gw.log_tail()),
+        let Some(m) = recv_until(results, deadline).await else {
+            panic!("нет результата команды {body}\n{}", gw.log_tail());
         };
         let r: Value = serde_json::from_slice(m.payload().unwrap_or_default()).unwrap();
         if r["commandId"] == id {

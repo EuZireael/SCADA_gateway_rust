@@ -86,7 +86,7 @@ if [ -n "${GATEWAY_BIN:-}" ]; then
   until_ok 120 "Kafka и Postgres готовы" bash -c "[ \"\$(docker inspect -f '{{.State.Health.Status}}' scada-rs-kafka)\" = healthy ] && [ \"\$(docker inspect -f '{{.State.Health.Status}}' scada-rs-postgres)\" = healthy ]"
   GW_LOG=$(mktemp)
   CONTROLLERS_YAML=config/stations/$GATEWAY_STATION PLC_HOST=127.0.0.1 PAC_HOST=127.0.0.1 PAC_PORT=${SIM_PAC_PORT:-10000} SERVER_PORT=8888 \
-    SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9094 \
+    SPRING_KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9094 \
     SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5433/scada_db \
     "$GATEWAY_BIN" >"$GW_LOG" 2>&1 &
   GW_PID=$!

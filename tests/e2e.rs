@@ -20,7 +20,7 @@ use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::{Value, json};
 
-use common::gateway::{Gateway, consumer_from_beginning, kafka_config};
+use common::gateway::{Gateway, consumer_from_beginning, kafka_config, recv_until};
 use common::{controllers, json_type_matches};
 
 /// Отправить команду и дождаться её результата (повтор с тем же commandId безопасен —
@@ -34,9 +34,7 @@ async fn command(gw: &Gateway, producer: &FutureProducer, results: &StreamConsum
             .await
             .expect("команда не отправлена");
         let deadline = Instant::now() + Duration::from_secs(3);
-        while let Ok(Ok(m)) =
-            tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), results.recv()).await
-        {
+        while let Some(m) = recv_until(results, deadline).await {
             let result: Value = serde_json::from_slice(m.payload().unwrap_or_default()).unwrap();
             if result["commandId"] == id {
                 return result;
@@ -50,9 +48,7 @@ async fn command(gw: &Gateway, producer: &FutureProducer, results: &StreamConsum
 async fn await_value(telemetry: &StreamConsumer, tag: &str, expected: &Value) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last = Value::Null;
-    while let Ok(Ok(m)) =
-        tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), telemetry.recv()).await
-    {
+    while let Some(m) = recv_until(telemetry, deadline).await {
         if m.key() == Some(tag.as_bytes()) {
             last = serde_json::from_slice::<Value>(m.payload().unwrap()).unwrap()["value"].clone();
             if &last == expected {
@@ -91,7 +87,7 @@ async fn gateway_end_to_end() {
     let mut problems: Vec<String> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(30);
     while good.len() < expected.len() && Instant::now() < deadline {
-        let Ok(Ok(m)) = tokio::time::timeout(Duration::from_secs(5), telemetry.recv()).await else { continue };
+        let Some(m) = recv_until(&telemetry, deadline).await else { break };
         let key = String::from_utf8_lossy(m.key().unwrap_or_default()).to_string();
         let body: Value = serde_json::from_slice(m.payload().unwrap_or_default()).expect("тело — JSON");
         let fields: Vec<&String> = body.as_object().map(|o| o.keys().collect()).unwrap_or_default();

@@ -50,5 +50,5 @@ if [ "${1:-}" = "plc" ]; then
 fi
 
 "${COMPOSE[@]}" up -d --build
-echo "▶ Режим $MODE. Шлюз: http://localhost:8888/actuator/health · Kafka для монитора: localhost:9094"
+echo "▶ Режим $MODE. Шлюз: http://localhost:8888/actuator/health · Kafka для монитора: 127.0.0.1:9094"
 [ "$MODE" = opcua ] && echo "  OPC UA станции: localhost:4840" || echo "  PAC прошивки: localhost:10100"

@@ -95,7 +95,7 @@ docker compose up -d postgres kafka simulator
 cargo build --release
 CONTROLLERS_YAML=config/stations/BN1_MCA1.yaml PLC_HOST=127.0.0.1 \
 SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5433/scada_db \
-SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9094 \
+SPRING_KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9094 \
 ./target/release/scada-gateway
 ```
 
