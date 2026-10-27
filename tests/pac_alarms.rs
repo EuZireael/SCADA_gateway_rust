@@ -1,6 +1,7 @@
-//! Аварии ПЛК (#139): OPC UA-сервер симулятора отдаёт список аварий узлом `SYSTEM.ALARMS` и исполняет действие методом
-//! `SYSTEM.ALARM_CMD`, как фасад ptusa-opcua. Шлюз публикует снимок списка в compact-топик аварий (ключ — id контроллера),
-//! исполняет команду `PAC_ALARM` и при обрыве связи публикует снимок `online: false` с последним списком.
+//! Аварии ПЛК (#139, #144). Список у симулятора один на оба сервера: OPC UA отдаёт его узлом `SYSTEM.ALARMS` и
+//! исполняет действие методом `SYSTEM.ALARM_CMD`, как фасад ptusa-opcua; PAC — командами 103/104, как сама прошивка.
+//! Шлюз публикует снимок списка в compact-топик аварий (ключ — id контроллера), исполняет команду `PAC_ALARM` и при
+//! обрыве связи публикует снимок `online: false` с последним списком.
 //!
 //!   cargo test --test pac_alarms -- --ignored      (симулятор + Kafka, см. tests/common)
 
@@ -24,15 +25,27 @@ use scada_gateway::pac_alarms;
 
 /// Тип объекта сообщений симулятора (танк у ptusa).
 const OBJECT_TYPE: i64 = 102;
-const FAST_TIMEOUTS: [(&str, &str); 3] = [
+const FAST_TIMEOUTS: [(&str, &str); 4] = [
     ("GATEWAY_OPCUA_OP_TIMEOUT_MS", "2000"),
+    ("GATEWAY_PAC_OP_TIMEOUT_MS", "1000"),
     ("GATEWAY_STALE_AFTER_MS", "3000"),
     ("GATEWAY_SUPERVISE_INTERVAL_MS", "1000"),
 ];
 
-/// Завести у симулятора сообщение объекта `object` (запись в служебный узел).
-async fn raise(endpoint: &str, object: i32) {
-    let conn = OpcConnection::connect(endpoint, OP_TIMEOUT).await.expect("нужен симулятор");
+/// Дождаться, пока шлюз начнёт читать команды: первый консьюмер группы читает с конца топика, и команда, отправленная
+/// раньше, пропала бы.
+async fn wait_consuming(gw: &Gateway) {
+    let since = Instant::now();
+    while !gw.log().contains("Приём команд включён") {
+        assert!(since.elapsed() < Duration::from_secs(30), "приём команд не включился\n{}", gw.log_tail());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Завести у симулятора сообщение объекта `object` (запись в служебный узел OPC UA-сервера; PAC видит тот же список).
+async fn raise(object: i32) {
+    let endpoint = controller(ControllerKind::OpcUa).endpoint;
+    let conn = OpcConnection::connect(&endpoint, OP_TIMEOUT).await.expect("нужен симулятор");
     let node = opcua::parse_node_id("ns=2;s=SYSTEM.ALARM_RAISE").unwrap();
     let status = conn.write(node, ::opcua::types::Variant::Int32(object)).await.unwrap();
     assert!(status.is_good(), "симулятор без аварий (пересоберите образ): {status}");
@@ -100,28 +113,44 @@ async fn cleanup_policy(topic: &str) -> Option<String> {
     config.get("cleanup.policy").and_then(|e| e.value.clone())
 }
 
-/// Сообщение появляется в снимке, квитирование (`APPLIED`) его убирает, неверные команды отклоняются, обрыв связи
-/// публикуется снимком `online: false` с последним списком, возврат — `online: true`.
+/// OPC UA-контроллер (фасад): сообщение появляется в снимке, квитирование убирает, обрыв — `online: false`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "нужны симулятор и Kafka: cargo test -- --ignored"]
 async fn alarms_are_published_accepted_and_marked_offline_on_link_loss() {
-    let ctrl = controller(ControllerKind::OpcUa);
+    scenario(ControllerKind::OpcUa, "4840", "4840").await;
+}
+
+/// PAC-контроллер: то же родным протоколом (103/104) по соединению опроса.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "нужны симулятор и Kafka: cargo test -- --ignored"]
+async fn pac_controller_alarms_are_published_accepted_and_marked_offline_on_link_loss() {
+    // Порт PAC настраивается (`SIM_PAC_PORT`, если 10000 занят настоящим ptusa_main): и в YAML, и у прокси — тот же.
+    let port = std::env::var("SIM_PAC_PORT").unwrap_or_else(|_| "10000".into());
+    scenario(ControllerKind::Pac, &port, "${SIM_PAC_PORT:10000}").await;
+}
+
+/// Сообщение появляется в снимке контроллера `kind`, квитирование (`APPLIED`) его убирает, неверные команды
+/// отклоняются, обрыв связи (прокси на порт `port`, в YAML записанный как `written`) публикуется снимком
+/// `online: false` с последним списком, возврат — `online: true`.
+async fn scenario(kind: ControllerKind, port: &str, written: &str) {
+    let ctrl = controller(kind);
     let id = pac_alarms::controller_id(&ctrl).to_string();
-    let path = pac_alarms::path(&ctrl).expect("у тегов OPC UA-контроллера есть общее начало имён");
+    let path = pac_alarms::path(&ctrl).expect("у тегов контроллера есть общее начало имён");
     // Свой номер объекта: симулятор общий для тестов, его сообщения остаются между запусками.
     let object = 10_000 + (uuid::Uuid::new_v4().as_u128() % 1_000_000) as i32;
 
-    // Шлюз ходит к OPC UA-серверу через прокси: связь можно оборвать.
-    let proxy = Proxy::start(format!("{}:4840", common::sim_host())).await;
+    // Шлюз ходит к серверу контроллера через прокси: связь можно оборвать.
+    let proxy = Proxy::start(format!("{}:{port}", common::sim_host())).await;
     let yaml = std::fs::read_to_string(common::controllers_path()).unwrap();
-    let from = "${SIM_HOST:127.0.0.1}:4840\"";
-    assert_eq!(yaml.matches(from).count(), 1, "в controllers.yaml нет endpoint'а …{from}");
+    let from = format!("${{SIM_HOST:127.0.0.1}}:{written}\"");
+    assert_eq!(yaml.matches(&from).count(), 1, "в controllers.yaml нет endpoint'а …{from}");
     let dir = tempfile::tempdir().unwrap();
     let yaml_path = dir.path().join("controllers.yaml");
-    std::fs::write(&yaml_path, yaml.replace(from, &format!("127.0.0.1:{}\"", proxy.port))).unwrap();
+    std::fs::write(&yaml_path, yaml.replace(&from, &format!("127.0.0.1:{}\"", proxy.port))).unwrap();
 
     let gw = Gateway::start_with(&yaml_path, &FAST_TIMEOUTS);
     gw.wait_links("UP", Duration::from_secs(30)).await;
+    wait_consuming(&gw).await;
     let alarms = consumer_from_beginning(&gw.topic("pac-alarms")).await;
     let results = consumer_from_beginning(&gw.topic("results")).await;
     let producer: FutureProducer = kafka_config().create().unwrap();
@@ -135,7 +164,7 @@ async fn alarms_are_published_accepted_and_marked_offline_on_link_loss() {
     assert!(first["pacVersion"].is_i64() && first["polledAt"].is_string(), "{first}");
 
     // Сообщение объекта появляется в снимке.
-    raise(&ctrl.endpoint, object).await;
+    raise(object).await;
     let with = snapshot(&gw, &alarms, &id, "с сообщением", |s| !of_object(s, object.into()).is_empty()).await;
     let alarm = of_object(&with, object.into()).remove(0);
     let number = alarm["alarmNumber"].as_i64().unwrap();
@@ -172,7 +201,7 @@ async fn alarms_are_published_accepted_and_marked_offline_on_link_loss() {
     }
 
     // Обрыв связи: один снимок «нет связи» с последним списком; связь вернулась — снова «на связи».
-    raise(&ctrl.endpoint, object).await;
+    raise(object).await;
     let listed =
         snapshot(&gw, &alarms, &id, "второе сообщение", |s| !of_object(s, object.into()).is_empty()).await;
     proxy.set(Mode::Reset);

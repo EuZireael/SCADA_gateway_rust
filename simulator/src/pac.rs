@@ -12,7 +12,9 @@
 //!   GET_DEVICES_STATES(101)  — снимок по приборам: `t={LINE1V0={M=0, ST=1}, ...}` (основной опрос);
 //!   EXEC_DEVICE_COMMAND(102) — запись: Lua-команда `set_cmd` применяется к RW-тегу, в ответ код
 //!                              результата LE16 (0 — применено, 1 — нет такого RW-поля);
-//!   GET_PAC_ERRORS(103)      — заглушка «нет ошибок».
+//!   GET_PAC_ERRORS(103)      — список аварий ([`crate::alarms`]) Lua-текстом, как у прошивки;
+//!   SET_PAC_ERROR_CMD(104)   — действие над аварией: строка `errors_manager:get_instance():set_cmd( cmd, t, n, a )`,
+//!                              в ответ код LE16 (0 — принято, 1 — строка не распознана).
 //! Остальное — пустой ответ со статусом успеха, как у ptusa.
 
 use std::collections::{BTreeMap, HashMap};
@@ -28,6 +30,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
 
+use crate::alarms::Alarms;
 use crate::value::Value;
 
 /// Версия протокола, которую сервер называет при handshake.
@@ -40,8 +43,10 @@ pub const CMD_GET_DEVICES: u8 = 100;
 pub const CMD_GET_DEVICES_STATES: u8 = 101;
 /// Команда: выполнить команду прибора.
 pub const CMD_EXEC_DEVICE_COMMAND: u8 = 102;
-/// Команда: ошибки PAC (симулятор отвечает пустым списком).
+/// Команда: список аварий PAC.
 pub const CMD_GET_PAC_ERRORS: u8 = 103;
+/// Команда: действие над аварией (квитировать, подавить, снять подавление).
+pub const CMD_SET_PAC_ERROR_CMD: u8 = 104;
 
 /// Приветствие, которое сервер присылает сразу после подключения.
 pub const BANNER: &[u8] = b"PAC accept";
@@ -88,12 +93,25 @@ pub struct PacModel {
     devices: Vec<PacDevice>,
     values: Mutex<HashMap<String, Value>>,
     on_write: Box<WriteFn>,
+    alarms: Arc<Alarms>,
 }
 
 impl PacModel {
-    /// Модель без значений; снимок кладёт цикл симулятора.
+    /// Модель без значений и без аварий; снимок кладёт цикл симулятора.
     pub fn new(name: &str, devices: Vec<PacDevice>, on_write: Box<WriteFn>) -> Self {
-        PacModel { name: name.to_string(), params_crc: 0, devices, values: Mutex::new(HashMap::new()), on_write }
+        PacModel {
+            name: name.to_string(),
+            params_crc: 0,
+            devices,
+            values: Mutex::new(HashMap::new()),
+            on_write,
+            alarms: Arc::default(),
+        }
+    }
+
+    /// Аварии берутся из общего списка ПЛК (тот же, что у OPC UA-сервера).
+    pub fn with_alarms(self, alarms: Arc<Alarms>) -> Self {
+        PacModel { alarms, ..self }
     }
 
     /// Обновить снимок значений (node_id → значение). Цикл симулятора зовёт на каждом шаге.
@@ -111,7 +129,15 @@ impl PacModel {
                 let applied = self.apply_command(payload.get(1..).unwrap_or_default());
                 (STATUS_OK, if applied { EXEC_APPLIED } else { EXEC_FAILED }.to_vec())
             }
-            CMD_GET_PAC_ERRORS => (STATUS_OK, b"errors={}\n\0".to_vec()),
+            CMD_GET_PAC_ERRORS => {
+                let mut lua = self.alarms.lua_text().into_bytes();
+                lua.push(0);
+                (STATUS_OK, lua)
+            }
+            CMD_SET_PAC_ERROR_CMD => {
+                let accepted = self.alarm_command(payload.get(1..).unwrap_or_default());
+                (STATUS_OK, if accepted { EXEC_APPLIED } else { EXEC_FAILED }.to_vec())
+            }
             other => {
                 // ptusa на незнакомую команду отвечает пустым телом со статусом успеха.
                 warn!("PAC: неизвестная команда {other}");
@@ -207,6 +233,37 @@ impl PacModel {
         info!("PAC: запись {dev}.{field} = {value:?}");
         (self.on_write)(dev, field, index, &value)
     }
+
+    /// CMD_SET_PAC_ERROR_CMD: `errors_manager:get_instance():set_cmd( cmd, t, n, a )` → команда над аварией. Код вне
+    /// `100`/`200`/`201` или другая строка — не принято (у прошивки — ошибка Lua).
+    fn alarm_command(&self, raw: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(raw);
+        let Some(m) = alarm_cmd_re().captures(text.trim_end_matches('\0')) else {
+            info!("PAC: команда аварии не распознана: {text:?}");
+            return false;
+        };
+        let action = match &m["cmd"] {
+            "100" => "ACCEPT",
+            "200" => "SUPPRESS",
+            "201" => "UNSUPPRESS",
+            _ => return false,
+        };
+        let number = |name: &str| m[name].parse::<i32>();
+        let (Ok(t), Ok(n), Ok(a)) = (number("t"), number("n"), number("a")) else { return false };
+        info!("PAC: {action} аварии {t}:{n}:{a}");
+        self.alarms.command(action, t, n, a)
+    }
+}
+
+/// Строка команды аварии: двоеточие перед `get_instance` обязательно (статический метод tolua).
+fn alarm_cmd_re() -> &'static Regex {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^errors_manager:get_instance\(\):set_cmd\(\s*(?P<cmd>\d+)\s*,\s*(?P<t>-?\d+)\s*,\s*(?P<n>-?\d+)\s*,\s*(?P<a>-?\d+)\s*\)$",
+        )
+        .expect("регэксп")
+    })
 }
 
 /// Поле-массив канала: `RT_PAR_F[12]` или `PAR_MAIN[1].P_CZAD_S` (хвост — подпись канала).
@@ -475,13 +532,42 @@ mod tests {
     }
 
     #[test]
-    fn info_and_errors() {
+    fn info_names_protocol_and_pac() {
         let m = model(Box::new(|_, _, _, _| false));
         let (_, info) = m.handle_command(CMD_GET_INFO_ON_CONNECT, &[CMD_GET_INFO_ON_CONNECT]);
         let info = String::from_utf8(info).unwrap();
         assert!(info.starts_with("protocol_version = 104;"), "{info}");
         assert!(info.contains("PAC_name = \"BN1-МСА1\""), "{info}");
-        assert_eq!(m.handle_command(CMD_GET_PAC_ERRORS, &[CMD_GET_PAC_ERRORS]), (STATUS_OK, b"errors={}\n\0".to_vec()));
+    }
+
+    #[test]
+    fn alarms_are_listed_and_commanded_like_ptusa() {
+        let alarms = Arc::new(Alarms::default());
+        let m = model(Box::new(|_, _, _, _| false)).with_alarms(alarms.clone());
+        let number = alarms.raise(2);
+        let (status, list) = m.handle_command(CMD_GET_PAC_ERRORS, &[CMD_GET_PAC_ERRORS, 0]);
+        assert_eq!((status, list.last()), (STATUS_OK, Some(&0u8)));
+        let lua = String::from_utf8(list).unwrap();
+        assert!(lua.starts_with("alarms[ 0 ] = \n  {}alarms[ 0 ] = \n"), "{lua}");
+        assert!(lua.contains(&format!("id_n=2,\nid_object_alarm_number={number},\nid_type=102,")), "{lua}");
+        let run = |text: &str| {
+            let mut payload = vec![CMD_SET_PAC_ERROR_CMD];
+            payload.extend(text.as_bytes());
+            payload.push(0);
+            m.handle_command(CMD_SET_PAC_ERROR_CMD, &payload)
+        };
+        for bad in [
+            "errors_manager.get_instance():set_cmd( 100, 102, 2, 1 )",
+            "errors_manager:get_instance():set_cmd( 300, 102, 2, 1 )",
+            "errors_manager:get_instance():set_cmd( 100, 102, 2, 'x' )",
+        ] {
+            assert_eq!(run(bad), (STATUS_OK, EXEC_FAILED.to_vec()), "{bad}");
+        }
+        assert!(alarms.lua_text().contains("id_n=2"), "неверные команды сообщение не трогают");
+        let accept = format!("errors_manager:get_instance():set_cmd( 100, 102, 2, {number} )");
+        assert_eq!(run(&accept), (STATUS_OK, EXEC_APPLIED.to_vec()));
+        assert!(!alarms.lua_text().contains("id_n=2"), "квитированное сообщение ушло");
+        assert_eq!(run(&accept), (STATUS_OK, EXEC_APPLIED.to_vec()), "над несуществующим — молча, как у ptusa");
     }
 
     #[test]

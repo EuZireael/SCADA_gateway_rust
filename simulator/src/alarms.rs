@@ -1,5 +1,7 @@
-//! Аварии прошивки, как их отдаёт OPC UA-фасад `ptusa-opcua`: список — JSON в узле `SYSTEM.ALARMS`, действие над аварией
-//! — метод `SYSTEM.ALARM_CMD`. Нужны, чтобы проверять публикацию аварий и квитирование шлюзом без настоящей прошивки.
+//! Аварии прошивки. OPC UA-сервер отдаёт их как фасад `ptusa-opcua`: список — JSON в узле `SYSTEM.ALARMS`, действие
+//! над аварией — метод `SYSTEM.ALARM_CMD`. PAC-сервер — как сама прошивка: список — Lua-ответом GET_PAC_ERRORS (103),
+//! действие — строкой `set_cmd` в SET_PAC_ERROR_CMD (104). Нужны, чтобы проверять публикацию аварий и квитирование
+//! шлюзом без настоящей прошивки.
 //!
 //! Сообщение заводит запись числа в служебный узел `SYSTEM.ALARM_RAISE` (номер объекта): у объекта появляется сообщение
 //! «ответ» (тип 102, номер — по порядку), как у ptusa, когда операция танка не включилась. Любая команда над сообщением
@@ -99,6 +101,33 @@ impl Alarms {
         true
     }
 
+    /// Список в виде ответа 103 прошивки (`g_errors.cpp`: таблица присваивается дважды, описание не экранируется).
+    /// Узел OPC UA (флаг «изменился») не трогает.
+    pub fn lua_text(&self) -> String {
+        let s = self.state();
+        let mut out = String::from("alarms[ 0 ] = \n  {}alarms[ 0 ] = \n  {");
+        for a in &s.alarms {
+            let state = match a.state {
+                "RETURN" => 2,
+                "ACCEPT" => 3,
+                _ => 1,
+            };
+            out.push_str(&format!(
+                "\t{{\n\tdescription=\"{}\",\n\tgroup=\"{}\",\npriority={},state={state},\ntype=4,\nid_n={},\n\
+                 id_object_alarm_number={},\nid_type={},\nsuppress={}\n}},\n",
+                a.description,
+                a.group,
+                a.priority,
+                a.object_number,
+                a.alarm_number.unwrap_or(-1),
+                a.object_type.unwrap_or(0),
+                a.suppressed
+            ));
+        }
+        out.push_str(&format!("  id = {},\n  }}\n", s.id));
+        out
+    }
+
     /// JSON списка, если он изменился с прошлого вызова.
     pub fn take_changed(&self) -> Option<String> {
         if !self.dirty.swap(false, Ordering::AcqRel) {
@@ -128,5 +157,22 @@ mod tests {
         assert!(!a.command("DELETE", OBJECT_TYPE, 3, 2));
         let json: serde_json::Value = serde_json::from_str(&a.take_changed().unwrap()).unwrap();
         assert_eq!((json["id"].as_i64(), json["alarms"].as_array().unwrap().len()), (Some(4), 1));
+    }
+
+    #[test]
+    fn lua_text_is_like_ptusa_and_leaves_the_opcua_node_alone() {
+        let a = Alarms::default();
+        assert_eq!(a.lua_text(), "alarms[ 0 ] = \n  {}alarms[ 0 ] = \n  {  id = 1,\n  }\n");
+        a.take_changed();
+        a.raise(2);
+        let lua = a.lua_text();
+        assert!(
+            lua.ends_with(
+                "\tgroup=\"ответ\",\npriority=750,state=1,\ntype=4,\nid_n=2,\nid_object_alarm_number=1,\nid_type=102,\n\
+                 suppress=false\n},\n  id = 2,\n  }\n"
+            ),
+            "{lua}"
+        );
+        assert!(a.take_changed().is_some(), "узел OPC UA обновится, хотя список уже отдан по PAC");
     }
 }

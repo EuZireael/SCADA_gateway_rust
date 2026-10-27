@@ -60,7 +60,7 @@ pub struct Station {
     pub db: Option<PgPool>,
     /// БД была недоступна при запуске: подготовить её в фоне ([`spawn_db_sync`]).
     pub pending_db: Option<PendingDb>,
-    /// id аварий ПЛК выключенных (`enabled: false`) OPC UA-контроллеров: их снимки удаляются из топика аварий
+    /// id аварий ПЛК выключенных (`enabled: false`) PAC- и OPC UA-контроллеров: их снимки удаляются из топика аварий
     /// ([`spawn_pac_alarms`]).
     pub disabled_alarm_ids: Vec<String>,
 }
@@ -120,11 +120,11 @@ pub async fn load_station(settings: &Settings) -> Result<Station> {
     Ok(Station { controllers: enabled, db, pending_db, disabled_alarm_ids })
 }
 
-/// id аварий выключенных OPC UA-контроллеров, кроме совпавших с id включённого (его снимок удалять нельзя).
+/// id аварий выключенных OPC UA- и PAC-контроллеров, кроме совпавших с id включённого (его снимок удалять нельзя).
 fn disabled_alarm_ids(enabled: &[Controller], disabled: &[Controller]) -> Vec<String> {
     let live: Vec<&str> = enabled.iter().map(pac_alarms::controller_id).collect();
     let mut ids: Vec<String> = Vec::new();
-    for id in disabled.iter().filter(|c| c.kind == ControllerKind::OpcUa).map(pac_alarms::controller_id) {
+    for id in disabled.iter().filter(|c| pac_alarms::has_alarms(c)).map(pac_alarms::controller_id) {
         if !live.contains(&id) && !ids.iter().any(|i| i == id) {
             ids.push(id.to_string());
         }
@@ -369,14 +369,17 @@ pub fn spawn_commands(app: &Arc<App>, leadership: &Arc<Leadership>, tasks: &mut 
     });
 }
 
-/// Аварии ПЛК (узел `SYSTEM.ALARMS` OPC UA-фасада ptusa): чтение и снимки по каждому OPC UA-контроллеру, удаление
-/// снимков выключенных контроллеров. Без Kafka, при `GATEWAY_PAC_ALARMS_ENABLED=false` или
+/// Аварии ПЛК (команда 103 по PAC, узел `SYSTEM.ALARMS` OPC UA-фасада ptusa): чтение и снимки по каждому PAC- и
+/// OPC UA-контроллеру, удаление снимков выключенных контроллеров. Без Kafka, при `GATEWAY_PAC_ALARMS_ENABLED=false` или
 /// `KAFKA_PUBLISH_PAC_ALARMS=false` не запускается (команды `PAC_ALARM` при этом исполняются, если аварии включены).
 pub fn spawn_pac_alarms(app: &Arc<App>, disabled_ids: Vec<String>, tasks: &mut Tasks) {
     if app.kafka.is_none() || !app.settings.gateway.pac_alarms_enabled || !app.settings.kafka.publish_pac_alarms {
         return;
     }
-    for handle in app.controllers.iter().filter(|h| h.ctrl.kind == ControllerKind::OpcUa) {
+    // Путь → контроллер, который его уже занял: одна прошивка через `pac://` и через фасад дала бы каждую аварию
+    // дважды.
+    let mut paths: Vec<(String, String)> = Vec::new();
+    for handle in app.controllers.iter().filter(|h| pac_alarms::has_alarms(&h.ctrl)) {
         let ctrl = &handle.ctrl;
         let Some(path) = pac_alarms::path(ctrl) else {
             warn!(
@@ -388,6 +391,14 @@ pub fn spawn_pac_alarms(app: &Arc<App>, disabled_ids: Vec<String>, tasks: &mut T
         let from =
             if ctrl.alarms_path.is_some() { "alarmsPath" } else { "общее начало имён тегов" };
         info!("{}: аварии ПЛК — controllerId «{}», path «{path}» ({from})", ctrl.name, pac_alarms::controller_id(ctrl));
+        if let Some((_, other)) = paths.iter().find(|(p, _)| *p == path) {
+            warn!(
+                "Аварии ПЛК: у контроллеров {other} и {} один path «{path}» — если это одна прошивка (по pac:// и через \
+                 фасад), монитор покажет каждую аварию дважды; задайте разный alarmsPath или оставьте один контроллер",
+                ctrl.name
+            );
+        }
+        paths.push((path.clone(), ctrl.name.clone()));
         let (app, handle, cancel) = (app.clone(), handle.clone(), tasks.cancel.clone());
         tasks.supervise(&format!("аварии {}", ctrl.name), move || {
             pac_alarms::run(app.clone(), handle.clone(), path.clone(), cancel.clone())
