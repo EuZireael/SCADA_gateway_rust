@@ -375,6 +375,7 @@ mod tests {
             identity: None,
             config_id: None,
             alarms_path: None,
+            pac_alarms: true,
         })
     }
 

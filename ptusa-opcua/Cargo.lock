@@ -1328,6 +1328,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ptusa-alarms"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mlua",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ptusa-opcua"
 version = "0.1.0"
 dependencies = [
@@ -1337,6 +1347,7 @@ dependencies = [
  "async-trait",
  "flate2",
  "mlua",
+ "ptusa-alarms",
  "serde",
  "serde_json",
  "serde_yaml_ng",
