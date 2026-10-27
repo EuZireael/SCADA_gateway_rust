@@ -322,6 +322,8 @@ pub struct Controller {
     pub config_id: Option<String>,
     /// `alarmsPath` из YAML: путь проекта в мониторе для снимка аварий.
     pub alarms_path: Option<String>,
+    /// `pacAlarms` из YAML (по умолчанию `true`): читать ли аварии ПЛК у контроллера.
+    pub pac_alarms: bool,
 }
 
 impl Controller {
@@ -338,6 +340,7 @@ impl Controller {
             identity: cfg.identity.clone(),
             config_id: cfg.id.clone().filter(|id| !id.trim().is_empty()),
             alarms_path: cfg.alarms_path.clone().filter(|p| !p.trim().is_empty()),
+            pac_alarms: cfg.pac_alarms.unwrap_or(true),
             tags: cfg
                 .tags
                 .iter()
@@ -604,6 +607,7 @@ mod tests {
             enabled: true,
             identity: None,
             alarms_path: None,
+            pac_alarms: None,
             tags: vec![t.clone()],
         };
         assert_eq!(Controller::from_config(&s).unwrap().cycle_period_ms(), 2000);

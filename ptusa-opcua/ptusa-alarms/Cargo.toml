@@ -1,0 +1,16 @@
+[package]
+name = "ptusa-alarms"
+version = "0.1.0"
+edition = "2024"
+description = "Аварии прошивки ptusa по driver-master: разбор ответа 103 и строка команды 104 — общее для шлюза и OPC UA-фасада"
+
+# Лежит внутри ptusa-opcua/, чтобы образ фасада собирался из своей папки (docker build ./ptusa-opcua); шлюз берёт его по
+# пути. В workspace фасада входит сам (путь внутри его папки): его тесты — `cargo test --workspace` в ptusa-opcua/.
+
+[dependencies]
+anyhow = "1"
+mlua = { version = "0.12.1", features = ["lua51", "vendored"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

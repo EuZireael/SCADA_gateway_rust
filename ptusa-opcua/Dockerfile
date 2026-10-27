@@ -14,6 +14,8 @@ FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+# Аварии прошивки ptusa — общий со шлюзом крейт.
+COPY ptusa-alarms ./ptusa-alarms
 # Кэш реестра crates и target между сборками (BuildKit).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \

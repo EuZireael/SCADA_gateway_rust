@@ -12,6 +12,8 @@ const_format = "0.2.36"
 flate2 = "1.1.10"
 mlua = { version = "0.12.1", features = ["lua51", "vendored", "send"] }
 prometheus = { version = "0.14.0", features = ["process"] }
+# Аварии прошивки ptusa (разбор 103, строка 104) — общие с OPC UA-фасадом; лежат в его папке, см. их Cargo.toml.
+ptusa-alarms = { path = "ptusa-opcua/ptusa-alarms" }
 rdkafka = { version = "0.39.0", features = ["cmake-build", "ssl-vendored"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }

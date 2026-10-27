@@ -15,7 +15,6 @@ use std::time::Duration;
 use ::opcua::types::{StatusCode, Variant};
 use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
-use serde::Deserialize;
 use serde_json::Value;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
@@ -28,6 +27,7 @@ use crate::messages::{CommandMessage, PacAlarm, PacAlarmsMessage};
 use crate::model::{Controller, ControllerKind};
 use crate::opcua::{self, OpcConnection, ReadValueId, same_status};
 use crate::pac::{self, alarms::AlarmsReader};
+use ptusa_alarms::{Action, Alarm, Alarms};
 
 /// Узел фасада со списком аварий (JSON).
 pub const ALARMS_NODE: &str = "ns=2;s=SYSTEM.ALARMS";
@@ -60,49 +60,14 @@ pub fn path(c: &Controller) -> Option<String> {
     (len > 0).then(|| first[..len].join("."))
 }
 
-/// Список фасада: счётчик изменений ПЛК и аварии.
-#[derive(Debug, Deserialize)]
-struct FacadeList {
-    id: i64,
-    alarms: Vec<Entry>,
-}
-
-/// Запись списка аварий прошивки — как её отдаёт фасад (JSON) и как её разбирает шлюз из ответа 103 по PAC.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Entry {
-    /// Тип объекта (`id_type`); у критических нет.
-    pub object_type: Option<i64>,
-    /// Номер объекта, серийный номер устройства или параметр критической ошибки (`id_n`).
-    pub object_number: i64,
-    /// Номер аварии в объекте (`id_object_alarm_number`); у критических нет.
-    pub alarm_number: Option<i64>,
-    /// Критическая ошибка прошивки (командой не квитируется).
-    #[serde(default)]
-    pub critical: bool,
-    /// Текст для оператора.
-    #[serde(default)]
-    pub description: String,
-    /// Группа.
-    #[serde(default)]
-    pub group: String,
-    /// Приоритет ptusa.
-    pub priority: i64,
-    /// `ALARM`, `RETURN` или `ACCEPT`.
-    pub state: String,
-    /// Подавлена.
-    #[serde(default)]
-    pub suppressed: bool,
-}
-
-/// JSON узла фасада → счётчик ПЛК и аварии снимка.
+/// JSON узла фасада (тот же [`Alarms`], что фасад сериализует) → счётчик ПЛК и аварии снимка.
 pub fn parse_facade(json: &str) -> Result<(i64, Vec<PacAlarm>)> {
-    let list: FacadeList = serde_json::from_str(json).context("список аварий фасада не разобран")?;
+    let list: Alarms = serde_json::from_str(json).context("список аварий фасада не разобран")?;
     Ok((list.id, snapshot_alarms(list.alarms)))
 }
 
 /// Записи списка → аварии снимка (ключ: `<тип>:<номер>:<авария>`, у критических — `C:<номер>`).
-pub fn snapshot_alarms(entries: Vec<Entry>) -> Vec<PacAlarm> {
+pub fn snapshot_alarms(entries: Vec<Alarm>) -> Vec<PacAlarm> {
     entries
         .into_iter()
         .map(|a| {
@@ -119,7 +84,7 @@ pub fn snapshot_alarms(entries: Vec<Entry>) -> Vec<PacAlarm> {
                 description: a.description,
                 group: a.group,
                 priority: a.priority,
-                state: a.state,
+                state: a.state.as_str().into(),
                 suppressed: a.suppressed,
             }
         })
@@ -269,7 +234,7 @@ async fn observe_pac(handle: &ControllerHandle, reader: &AlarmsReader) -> Seen {
     };
     drop(guard);
     match reader.parse(&text) {
-        Ok((version, entries)) => Seen::List(version, snapshot_alarms(entries)),
+        Ok(list) => Seen::List(list.id, snapshot_alarms(list.alarms)),
         Err(e) => Seen::Unreadable(format!("ответ 103 не разобран: {e:#}")),
     }
 }
@@ -369,8 +334,8 @@ pub async fn tombstones(app: Arc<App>, ids: Vec<String>, cancel: CancellationTok
 pub struct AlarmCommand {
     /// Контроллер, как его назвала команда.
     pub controller_id: String,
-    /// `ACCEPT`, `SUPPRESS` или `UNSUPPRESS`.
-    pub action: &'static str,
+    /// Действие.
+    pub action: Action,
     /// Тип объекта.
     pub object_type: i32,
     /// Номер объекта.
@@ -387,16 +352,15 @@ impl AlarmCommand {
 
     /// Строка команды 104 прошивке (для PAC-контроллера).
     pub fn pac_text(&self) -> String {
-        let code = pac::alarms::action_code(self.action).expect("действие проверено при разборе команды");
-        pac::alarms::command_text(code, self.object_type, self.object_number, self.alarm_number)
+        ptusa_alarms::command_text(self.action, self.object_type, self.object_number, self.alarm_number)
     }
 
     /// Пояснение к `APPLIED`.
     fn done(&self) -> String {
         let done = match self.action {
-            "ACCEPT" => "Квитирована",
-            "SUPPRESS" => "Подавлена",
-            _ => "Снято подавление:",
+            Action::Accept => "Квитирована",
+            Action::Suppress => "Подавлена",
+            Action::Unsuppress => "Снято подавление:",
         };
         format!("{done} авария {}", self.key())
     }
@@ -409,11 +373,8 @@ pub fn parse_command(cmd: &CommandMessage) -> Result<AlarmCommand, String> {
         Value::String(s) if !s.trim().is_empty() => s.clone(),
         other => return Err(format!("controllerId должен быть строкой, пришло {other}")),
     };
-    let action = match cmd.action.as_str() {
-        Some("ACCEPT") => "ACCEPT",
-        Some("SUPPRESS") => "SUPPRESS",
-        Some("UNSUPPRESS") => "UNSUPPRESS",
-        _ => return Err(format!("action — ACCEPT, SUPPRESS или UNSUPPRESS, пришло {}", cmd.action)),
+    let Some(action) = cmd.action.as_str().and_then(Action::parse) else {
+        return Err(format!("action — ACCEPT, SUPPRESS или UNSUPPRESS, пришло {}", cmd.action));
     };
     let int = |field: &str, v: &Value| -> Result<i32, String> {
         v.as_i64().and_then(|n| i32::try_from(n).ok()).ok_or_else(|| match v {
@@ -430,7 +391,8 @@ pub fn parse_command(cmd: &CommandMessage) -> Result<AlarmCommand, String> {
     })
 }
 
-/// Контроллер команды: включённый, OPC UA или PAC, аварии не выключены; `Err` — исход `REJECTED_UNKNOWN_TAG`.
+/// Контроллер команды: включённый, OPC UA или PAC, аварии не выключены (ни переменной, ни `pacAlarms: false`);
+/// `Err` — исход `REJECTED_UNKNOWN_TAG`.
 pub fn controller(app: &App, id: &str) -> Result<Arc<ControllerHandle>, Outcome> {
     if !app.settings.gateway.pac_alarms_enabled {
         return Err(Outcome::fail("REJECTED_UNKNOWN_TAG", "Аварии ПЛК выключены (GATEWAY_PAC_ALARMS_ENABLED=false)"));
@@ -440,18 +402,29 @@ pub fn controller(app: &App, id: &str) -> Result<Arc<ControllerHandle>, Outcome>
         .iter()
         .find(|h| controller_id(&h.ctrl) == id)
         .ok_or_else(|| Outcome::fail("REJECTED_UNKNOWN_TAG", format!("Контроллер не найден или выключен: {id}")))?;
-    if !has_alarms(&handle.ctrl) {
+    if !alarms_protocol(&handle.ctrl) {
         return Err(Outcome::fail(
             "REJECTED_UNKNOWN_TAG",
             format!("Аварии ПЛК — у PAC-контроллеров и у OPC UA-фасада ptusa-opcua, не у Modbus: {id}"),
         ));
     }
+    if !handle.ctrl.pac_alarms {
+        return Err(Outcome::fail(
+            "REJECTED_UNKNOWN_TAG",
+            format!("Аварии ПЛК у контроллера выключены (pacAlarms: false): {id}"),
+        ));
+    }
     Ok(handle.clone())
 }
 
-/// У контроллера могут быть аварии ПЛК: PAC или OPC UA (у сервера без узла фасада их просто нет).
-pub fn has_alarms(c: &Controller) -> bool {
+/// Протокол контроллера знает аварии ПЛК: PAC или OPC UA (у сервера без узла фасада их просто нет).
+pub fn alarms_protocol(c: &Controller) -> bool {
     matches!(c.kind, ControllerKind::OpcUa | ControllerKind::Pac)
+}
+
+/// Аварии ПЛК у контроллера читаются: протокол их знает и они не выключены `pacAlarms: false`.
+pub fn has_alarms(c: &Controller) -> bool {
+    alarms_protocol(c) && c.pac_alarms
 }
 
 /// Исполнить действие: метод фасада (OPC UA) или команда 104 (PAC). Итог виден по следующему снимку — от себя снимок не
@@ -472,7 +445,7 @@ async fn execute_pac(handle: &ControllerHandle, cmd: &AlarmCommand) -> Outcome {
     let key = cmd.key();
     match conn.exec_alarm_command(&cmd.pac_text()).await {
         Ok(0) => {
-            info!("✍ {}: авария {key} — {}", handle.ctrl.name, cmd.action);
+            info!("✍ {}: авария {key} — {}", handle.ctrl.name, cmd.action.as_str());
             Outcome { status: "APPLIED", message: cmd.done(), applied: None }
         }
         Ok(code) => Outcome::fail("FAILED_WRITE", format!("ПЛК не выполнил команду над аварией {key} (код {code})")),
@@ -495,7 +468,7 @@ async fn execute_opcua(handle: &ControllerHandle, cmd: &AlarmCommand) -> Outcome
         _ => unreachable!("адреса метода аварий — константы"),
     };
     let args = vec![
-        Variant::from(cmd.action),
+        Variant::from(cmd.action.as_str()),
         Variant::Int32(cmd.object_type),
         Variant::Int32(cmd.object_number),
         Variant::Int32(cmd.alarm_number),
@@ -503,7 +476,7 @@ async fn execute_opcua(handle: &ControllerHandle, cmd: &AlarmCommand) -> Outcome
     let key = cmd.key();
     match conn.call(object, method, args).await {
         Ok(status) if status.is_good() => {
-            info!("✍ {}: авария {key} — {}", handle.ctrl.name, cmd.action);
+            info!("✍ {}: авария {key} — {}", handle.ctrl.name, cmd.action.as_str());
             Outcome { status: "APPLIED", message: cmd.done(), applied: None }
         }
         Ok(status) if same_status(status, StatusCode::BadInvalidState) => {
@@ -532,8 +505,12 @@ async fn execute_opcua(handle: &ControllerHandle, cmd: &AlarmCommand) -> Outcome
 mod tests {
     use serde_json::json;
 
+    use ptusa_alarms::samples;
+
     use super::*;
     use crate::config::ServerConfig;
+    use crate::pac::PacConnection;
+    use crate::pac::connection::fake;
 
     fn ctrl(yaml_extra: &str, names: &[&str]) -> Controller {
         let tags: Vec<String> = names
@@ -663,23 +640,11 @@ mod tests {
     /// рвёт (опрос переподключится), без соединения команда — «нет связи».
     #[tokio::test]
     async fn pac_controller_reads_the_list_and_executes_commands_over_its_connection() {
-        use std::sync::Mutex;
-
-        use crate::pac::PacConnection;
-        use crate::pac::alarms::samples;
-        use crate::pac::connection::fake;
-
-        let answer = Arc::new(Mutex::new(samples::OBJECT.to_string()));
-        let (port, commands) = fake::spawn_with_alarms(true, answer.clone()).await;
-        let yaml = format!(
-            "name: P\nendpoint: pac://127.0.0.1:{port}\nenabled: true\n\
-             tags: [{{name: P.V1.ST, nodeId: V1.ST, dataType: INT32, enabled: true}}]\n"
-        );
-        let handle = ControllerHandle::new(
-            Controller::from_config(&serde_yaml_ng::from_str::<ServerConfig>(&yaml).unwrap()).unwrap(),
-        );
-        let conn = PacConnection::connect("127.0.0.1", port, Duration::from_millis(500)).await.unwrap();
-        *handle.pac.lock().await = Some(conn);
+        let fake = fake::start(true).await;
+        let (port, commands, answer) = (fake.port, fake.commands.clone(), fake.alarms.clone());
+        *answer.lock().unwrap() = samples::OBJECT.into();
+        let handle = ControllerHandle::new(pac_controller(port));
+        *handle.pac.lock().await = Some(pac_connection(port).await);
         let reader = AlarmsReader::new().unwrap();
 
         match observe_pac(&handle, &reader).await {
@@ -688,16 +653,32 @@ mod tests {
             }
             other => panic!("ждали список: {other:?}"),
         }
+        *answer.lock().unwrap() = samples::CRITICAL.into();
+        match observe_pac(&handle, &reader).await {
+            Seen::List(7, alarms) => assert_eq!((alarms[0].key.as_str(), alarms[0].object_type), ("C:1", None)),
+            other => panic!("ждали критическую: {other:?}"),
+        }
         let accept = AlarmCommand {
             controller_id: "P".into(),
-            action: "ACCEPT",
+            action: Action::Accept,
             object_type: 102,
             object_number: 2,
             alarm_number: 3,
         };
         let done = execute(&handle, &accept).await;
         assert_eq!((done.status, done.message.as_str()), ("APPLIED", "Квитирована авария 102:2:3"));
-        assert_eq!(commands.lock().unwrap().last().unwrap(), "errors_manager:get_instance():set_cmd( 100, 102, 2, 3 )");
+        assert_eq!(
+            commands.lock().unwrap().last().unwrap(),
+            "errors_manager:get_instance():set_cmd( 100, 102, 2, 3 )\0"
+        );
+        // Ответ [1, 0] — прошивка не выполнила (ошибка Lua): FAILED_WRITE, соединение остаётся.
+        fake.alarm_command_code.store(1, std::sync::atomic::Ordering::Relaxed);
+        let failed = execute(&handle, &accept).await;
+        assert_eq!(
+            (failed.status, failed.message.as_str()),
+            ("FAILED_WRITE", "ПЛК не выполнил команду над аварией 102:2:3 (код 1)")
+        );
+        assert!(handle.pac.lock().await.is_some());
 
         for (bad, why) in [
             (fake::BAD_ZLIB, "zlib"),
@@ -715,8 +696,7 @@ mod tests {
         assert!(handle.pac.lock().await.is_none(), "таймаут — соединение закрыто, опрос переподключится");
         assert_eq!(observe_pac(&handle, &reader).await, Seen::Connecting);
         *answer.lock().unwrap() = fake::CLOSED.into();
-        *handle.pac.lock().await =
-            Some(PacConnection::connect("127.0.0.1", port, Duration::from_millis(500)).await.unwrap());
+        *handle.pac.lock().await = Some(pac_connection(port).await);
         assert_eq!(
             observe_pac(&handle, &reader).await,
             Seen::Connecting,
@@ -724,6 +704,88 @@ mod tests {
         );
         assert!(handle.pac.lock().await.is_none());
         assert_eq!(execute(&handle, &accept).await.status, "FAILED_NO_CONNECTION");
+    }
+
+    /// Список PAC-контроллера читается своим таймером: не чаще `GATEWAY_PAC_ALARMS_INTERVAL_MS`, сколько бы ни шёл
+    /// опрос; неизменный список публикуется один раз.
+    #[tokio::test]
+    async fn pac_list_is_read_by_its_own_timer_not_more_often_than_the_interval() {
+        let fake = fake::start(true).await;
+        let (app, kafka) = app_with(vec![pac_controller(fake.port)]);
+        let handle = app.controllers[0].clone();
+        *handle.pac.lock().await = Some(pac_connection(fake.port).await);
+
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run(app.clone(), handle, "P".into(), cancel.clone()));
+        tokio::time::sleep(Duration::from_millis(1050)).await;
+        cancel.cancel();
+        task.await.unwrap();
+        let requests = fake.alarm_requests.load(std::sync::atomic::Ordering::Relaxed);
+        assert!((3..=11).contains(&requests), "запросов 103 за 1 с при интервале 100 мс: {requests}");
+        let topic = &app.settings.kafka.topics.pac_alarms;
+        let snapshots = kafka.captured.lock().unwrap().iter().filter(|(t, _, _)| t == topic).count();
+        assert_eq!(snapshots, 1, "список не менялся — один снимок");
+    }
+
+    /// `pacAlarms: false` — аварий у контроллера нет: не читаются, команда к нему — `REJECTED_UNKNOWN_TAG`.
+    #[test]
+    fn pac_alarms_false_turns_alarms_off_for_the_controller() {
+        let on = pac_controller(1);
+        let off = controller_from(&format!("{}pacAlarms: false\n", pac_yaml("Q", 2)));
+        assert!(has_alarms(&on) && !has_alarms(&off) && alarms_protocol(&off));
+        let (app, _) = app_with(vec![on, off]);
+        assert!(super::controller(&app, "P").is_ok());
+        let Err(rejected) = super::controller(&app, "Q") else { panic!("Q с pacAlarms: false принят") };
+        assert_eq!(rejected.status, "REJECTED_UNKNOWN_TAG");
+        assert!(rejected.message.contains("pacAlarms: false"), "{}", rejected.message);
+    }
+
+    /// Шлюз с контроллерами `controllers`, интервалом аварий 100 мс и Kafka, которая копит отправленное.
+    fn app_with(controllers: Vec<Controller>) -> (Arc<App>, Arc<crate::kafka::KafkaOut>) {
+        use crate::app::AppDeps;
+        use crate::config::Settings;
+        use crate::events;
+        use crate::kafka::KafkaOut;
+        use crate::leadership::Leadership;
+        use crate::metrics::Metrics;
+        use crate::script::Scripts;
+
+        let mut settings = Settings::from_env().expect("настройки по умолчанию");
+        settings.gateway.pac_alarms_interval = Duration::from_millis(100);
+        let metrics = Arc::new(Metrics::new());
+        let leadership = Leadership::single("test".into(), metrics.ha_gauge("test"));
+        let kafka = Arc::new(KafkaOut::new(&settings.kafka, metrics.clone(), leadership.clone()).expect("продюсер"));
+        let (events, _) = events::channel(metrics.clone());
+        let deps = AppDeps {
+            metrics,
+            kafka: Some(kafka.clone()),
+            events,
+            telemetry: None,
+            db: None,
+            leadership,
+            scripts: Scripts::none(),
+        };
+        (Arc::new(App::new(settings, deps, controllers)), kafka)
+    }
+
+    fn pac_yaml(name: &str, port: u16) -> String {
+        format!(
+            "name: {name}\nendpoint: pac://127.0.0.1:{port}\nenabled: true\n\
+             tags: [{{name: {name}.V1.ST, nodeId: V1.ST, dataType: INT32, enabled: true}}]\n"
+        )
+    }
+
+    fn controller_from(yaml: &str) -> Controller {
+        Controller::from_config(&serde_yaml_ng::from_str::<ServerConfig>(yaml).unwrap()).unwrap()
+    }
+
+    /// PAC-контроллер `P` на фейковом PAC.
+    fn pac_controller(port: u16) -> Controller {
+        controller_from(&pac_yaml("P", port))
+    }
+
+    async fn pac_connection(port: u16) -> PacConnection {
+        PacConnection::connect("127.0.0.1", port, Duration::from_millis(500)).await.unwrap()
     }
 
     fn command(body: Value) -> CommandMessage {
@@ -739,7 +801,7 @@ mod tests {
             parsed,
             AlarmCommand {
                 controller_id: "ptusa-танки".into(),
-                action: "ACCEPT",
+                action: Action::Accept,
                 object_type: 102,
                 object_number: 2,
                 alarm_number: 3
