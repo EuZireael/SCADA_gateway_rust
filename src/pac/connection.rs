@@ -121,10 +121,10 @@ impl PacConnection {
         Ok(lua_text(&body).into_owned())
     }
 
-    /// SET_PAC_ERROR_CMD; текст — [`super::alarms::command_text`] (только целые). Код результата PAC (LE16): 0 —
-    /// выполнено, иначе ошибка Lua в прошивке. `Err` — сбой обмена.
+    /// SET_PAC_ERROR_CMD; текст — [`ptusa_alarms::command_text`] (только целые), уходит C-строкой с `\0`, как у
+    /// драйвера старой SCADA. Код результата PAC (LE16): 0 — выполнено, иначе ошибка Lua в прошивке. `Err` — сбой обмена.
     pub async fn exec_alarm_command(&mut self, text: &str) -> Result<u16> {
-        let result = self.request(CMD_SET_PAC_ERROR_CMD, text.as_bytes()).await?;
+        let result = self.request(CMD_SET_PAC_ERROR_CMD, &[text.as_bytes(), &[0]].concat()).await?;
         Ok(exec_result_code(&result))
     }
 
@@ -184,6 +184,7 @@ fn lua_text(body: &[u8]) -> std::borrow::Cow<'_, str> {
 /// Фейковый PAC в процессе — повторяет поведение эмулятора ptusa (для тестов).
 #[cfg(test)]
 pub mod fake {
+    use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -209,29 +210,50 @@ pub mod fake {
     /// Ответ 103 вместо списка: PAC закрывает соединение.
     pub const CLOSED: &str = "<обрыв>";
 
-    /// Поднять фейковый PAC на свободном порту. banner=false — без приветствия.
-    pub async fn spawn(banner: bool) -> (u16, Arc<Mutex<Vec<String>>>) {
-        spawn_with_alarms(banner, Arc::new(Mutex::new(NO_ALARMS.into()))).await
+    /// Фейковый PAC: порт и то, что тест видит и меняет по ходу.
+    #[derive(Clone)]
+    pub struct Fake {
+        /// Порт на 127.0.0.1.
+        pub port: u16,
+        /// Команды 102 и 104, как пришли (у 104 — C-строка с завершающим `\0`).
+        pub commands: Arc<Mutex<Vec<String>>>,
+        /// Ответ на 103: Lua-текст списка или особый ответ — [`BAD_ZLIB`], [`STATUS_ERROR_ANSWER`], [`SILENT`],
+        /// [`CLOSED`].
+        pub alarms: Arc<Mutex<String>>,
+        /// Сколько пришло запросов 103.
+        pub alarm_requests: Arc<AtomicUsize>,
+        /// Код ответа на 104 с верной строкой `set_cmd` (0 — выполнено, иначе — как ошибка Lua в прошивке).
+        pub alarm_command_code: Arc<AtomicU16>,
     }
 
-    /// То же, ответ на 103 — текущее значение `alarms` (тест меняет его по ходу; особые ответы — [`BAD_ZLIB`],
-    /// [`STATUS_ERROR_ANSWER`], [`SILENT`], [`CLOSED`]). Команды 102 и 104 копятся в возвращённом списке.
-    pub async fn spawn_with_alarms(banner: bool, alarms: Arc<Mutex<String>>) -> (u16, Arc<Mutex<Vec<String>>>) {
+    /// Поднять фейковый PAC на свободном порту. banner=false — без приветствия.
+    pub async fn spawn(banner: bool) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let fake = start(banner).await;
+        (fake.port, fake.commands)
+    }
+
+    /// То же, со всем, что видно тесту; список аварий пуст, команды 104 выполняются.
+    pub async fn start(banner: bool) -> Fake {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let commands = Arc::new(Mutex::new(Vec::new()));
-        let seen = commands.clone();
+        let fake = Fake {
+            port: listener.local_addr().unwrap().port(),
+            commands: Arc::default(),
+            alarms: Arc::new(Mutex::new(NO_ALARMS.into())),
+            alarm_requests: Arc::default(),
+            alarm_command_code: Arc::default(),
+        };
+        let shared = fake.clone();
         tokio::spawn(async move {
             // Каждое соединение — своя задача: тест может переподключиться после обрыва.
             while let Ok((s, _)) = listener.accept().await {
-                tokio::spawn(serve(s, banner, alarms.clone(), seen.clone()));
+                tokio::spawn(serve(s, banner, shared.clone()));
             }
         });
-        (port, commands)
+        fake
     }
 
     /// Одно соединение фейкового PAC: приветствие, затем «запрос — ответ» до обрыва.
-    async fn serve(mut s: TcpStream, banner: bool, alarms: Arc<Mutex<String>>, seen: Arc<Mutex<Vec<String>>>) {
+    async fn serve(mut s: TcpStream, banner: bool, fake: Fake) {
         if banner {
             s.write_all(BANNER).await.ok();
         } else {
@@ -249,7 +271,8 @@ pub mod fake {
             let mut status = 12;
             let body: Vec<u8> = match payload[0] {
                 CMD_GET_PAC_ERRORS => {
-                    let text = alarms.lock().unwrap().clone();
+                    fake.alarm_requests.fetch_add(1, Ordering::Relaxed);
+                    let text = fake.alarms.lock().unwrap().clone();
                     match text.as_str() {
                         SILENT => std::future::pending().await,
                         CLOSED => return,
@@ -271,16 +294,20 @@ pub mod fake {
                 }
                 CMD_SET_PAC_ERROR_CMD => {
                     let lua = String::from_utf8_lossy(&payload[1..]).to_string();
-                    let ok = lua.starts_with("errors_manager:get_instance():set_cmd(");
-                    seen.lock().unwrap().push(lua);
-                    if ok { vec![0, 0] } else { vec![1, 0] }
+                    let code = if lua.starts_with("errors_manager:get_instance():set_cmd(") {
+                        fake.alarm_command_code.load(Ordering::Relaxed)
+                    } else {
+                        1
+                    };
+                    fake.commands.lock().unwrap().push(lua);
+                    code.to_le_bytes().to_vec()
                 }
                 CMD_GET_INFO_ON_CONNECT => INFO.as_bytes().to_vec(),
                 CMD_GET_DEVICES_STATES => [&[0u8, 0][..], STATES.as_bytes()].concat(),
                 CMD_EXEC_DEVICE_COMMAND => {
                     let lua = String::from_utf8_lossy(&payload[1..]).to_string();
                     let ok = lua.starts_with("__LINE1V0:") || lua.starts_with("__RECMAN[");
-                    seen.lock().unwrap().push(lua);
+                    fake.commands.lock().unwrap().push(lua);
                     if ok { vec![0, 0] } else { vec![1, 0] }
                 }
                 _ => Vec::new(),
@@ -336,23 +363,33 @@ mod tests {
     /// молчание — рвёт (поток в неизвестном состоянии).
     #[tokio::test]
     async fn alarms_are_read_and_commanded_over_the_same_connection() {
-        use std::sync::{Arc, Mutex};
+        use ptusa_alarms::samples;
 
-        use crate::pac::alarms::{AlarmsReader, samples};
+        use crate::pac::alarms::AlarmsReader;
 
-        let alarms = Arc::new(Mutex::new(samples::OBJECT.to_string()));
-        let (port, commands) = fake::spawn_with_alarms(true, alarms.clone()).await;
+        let fake = fake::start(true).await;
+        let (port, commands, alarms) = (fake.port, fake.commands.clone(), fake.alarms.clone());
+        *alarms.lock().unwrap() = samples::OBJECT.into();
         let mut conn = PacConnection::connect("127.0.0.1", port, Duration::from_millis(500)).await.unwrap();
         let reader = AlarmsReader::new().unwrap();
-        let (id, list) = reader.parse(&conn.alarms_text().await.unwrap()).unwrap();
-        assert_eq!((id, list.len(), list[0].object_number), (50, 1, 2));
+        let list = reader.parse(&conn.alarms_text().await.unwrap()).unwrap();
+        assert_eq!((list.id, list.alarms.len(), list.alarms[0].object_number), (50, 1, 2));
         conn.poll_states().await.unwrap();
         assert_eq!(conn.read_value("LINE1V0", "ST", "INT32"), Some(TagValue::Int(1)), "снимок после 103 не сбит");
+        // Критическая ошибка — в своём виде (константы словами, без типа и номера аварии).
+        *alarms.lock().unwrap() = samples::CRITICAL.into();
+        let critical = &reader.parse(&conn.alarms_text().await.unwrap()).unwrap().alarms[0];
+        assert_eq!((critical.critical, critical.object_type, critical.alarm_number), (true, None, None));
+        assert_eq!(fake.alarm_requests.load(std::sync::atomic::Ordering::Relaxed), 2);
 
-        let text = crate::pac::alarms::command_text(100, 102, 2, 3);
+        let text = ptusa_alarms::command_text(ptusa_alarms::Action::Accept, 102, 2, 3);
         assert_eq!(conn.exec_alarm_command(&text).await.unwrap(), 0);
         assert_eq!(conn.exec_alarm_command("set_cmd(1)").await.unwrap(), 1, "ошибка Lua в прошивке — код, не обрыв");
-        assert_eq!(commands.lock().unwrap()[0], "errors_manager:get_instance():set_cmd( 100, 102, 2, 3 )");
+        assert_eq!(
+            commands.lock().unwrap()[0],
+            "errors_manager:get_instance():set_cmd( 100, 102, 2, 3 )\0",
+            "C-строка"
+        );
 
         for bad in [fake::BAD_ZLIB, fake::STATUS_ERROR_ANSWER] {
             *alarms.lock().unwrap() = bad.into();

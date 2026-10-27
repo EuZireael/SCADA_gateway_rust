@@ -60,8 +60,8 @@ pub struct Station {
     pub db: Option<PgPool>,
     /// БД была недоступна при запуске: подготовить её в фоне ([`spawn_db_sync`]).
     pub pending_db: Option<PendingDb>,
-    /// id аварий ПЛК выключенных (`enabled: false`) PAC- и OPC UA-контроллеров: их снимки удаляются из топика аварий
-    /// ([`spawn_pac_alarms`]).
+    /// id аварий ПЛК выключенных (`enabled: false` или `pacAlarms: false`) PAC- и OPC UA-контроллеров: их снимки
+    /// удаляются из топика аварий ([`spawn_pac_alarms`]).
     pub disabled_alarm_ids: Vec<String>,
 }
 
@@ -120,11 +120,13 @@ pub async fn load_station(settings: &Settings) -> Result<Station> {
     Ok(Station { controllers: enabled, db, pending_db, disabled_alarm_ids })
 }
 
-/// id аварий выключенных OPC UA- и PAC-контроллеров, кроме совпавших с id включённого (его снимок удалять нельзя).
+/// id снимков аварий, которые никто не публикует: выключенные OPC UA- и PAC-контроллеры и включённые с
+/// `pacAlarms: false`, кроме id контроллера, который аварии публикует (его снимок удалять нельзя).
 fn disabled_alarm_ids(enabled: &[Controller], disabled: &[Controller]) -> Vec<String> {
-    let live: Vec<&str> = enabled.iter().map(pac_alarms::controller_id).collect();
+    let live: Vec<&str> = enabled.iter().filter(|c| pac_alarms::has_alarms(c)).map(pac_alarms::controller_id).collect();
     let mut ids: Vec<String> = Vec::new();
-    for id in disabled.iter().filter(|c| pac_alarms::has_alarms(c)).map(pac_alarms::controller_id) {
+    let silent = disabled.iter().chain(enabled.iter().filter(|c| !c.pac_alarms));
+    for id in silent.filter(|c| pac_alarms::alarms_protocol(c)).map(pac_alarms::controller_id) {
         if !live.contains(&id) && !ids.iter().any(|i| i == id) {
             ids.push(id.to_string());
         }
@@ -394,7 +396,7 @@ pub fn spawn_pac_alarms(app: &Arc<App>, disabled_ids: Vec<String>, tasks: &mut T
         if let Some((_, other)) = paths.iter().find(|(p, _)| *p == path) {
             warn!(
                 "Аварии ПЛК: у контроллеров {other} и {} один path «{path}» — если это одна прошивка (по pac:// и через \
-                 фасад), монитор покажет каждую аварию дважды; задайте разный alarmsPath или оставьте один контроллер",
+                 фасад), монитор покажет каждую аварию дважды; оставьте аварии одному: pacAlarms: false у другого",
                 ctrl.name
             );
         }
@@ -405,7 +407,10 @@ pub fn spawn_pac_alarms(app: &Arc<App>, disabled_ids: Vec<String>, tasks: &mut T
         });
     }
     if !disabled_ids.is_empty() {
-        info!("Снимки аварий выключенных контроллеров удаляются из топика: {}", disabled_ids.join(", "));
+        info!(
+            "Снимки аварий выключенных контроллеров (и с pacAlarms: false) удаляются из топика: {}",
+            disabled_ids.join(", ")
+        );
         let (app, cancel) = (app.clone(), tasks.cancel.clone());
         tasks.supervise("аварии: выключенные контроллеры", move || {
             pac_alarms::tombstones(app.clone(), disabled_ids.clone(), cancel.clone())
@@ -466,4 +471,34 @@ pub async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     ctrl_c.await.ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ServerConfig;
+
+    fn controller(yaml: &str) -> Controller {
+        Controller::from_config(&serde_yaml_ng::from_str::<ServerConfig>(yaml).unwrap()).unwrap()
+    }
+
+    /// Снимки удаляются у выключенных PAC/OPC UA-контроллеров и у включённых с `pacAlarms: false`, но не у id, под
+    /// которым аварии публикует другой контроллер, и не у Modbus.
+    #[test]
+    fn snapshots_without_a_publisher_are_removed() {
+        let tags = "tags: [{name: A.V1.ST, nodeId: V1.ST, dataType: INT32, enabled: true}]\n";
+        let pac =
+            |id: &str, extra: &str| controller(&format!("id: {id}\nname: {id}\nendpoint: pac://h:1\n{extra}{tags}"));
+        let enabled = [
+            pac("live", "enabled: true\n"),
+            pac("off", "enabled: true\npacAlarms: false\n"),
+            pac("twin", "enabled: true\n"),
+        ];
+        let disabled = [
+            pac("gone", ""),
+            pac("twin", ""),
+            controller(&format!("id: wago\nname: wago\nendpoint: modbus://h:502\n{tags}")),
+        ];
+        assert_eq!(disabled_alarm_ids(&enabled, &disabled), ["gone", "off"]);
+    }
 }

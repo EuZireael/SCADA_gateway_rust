@@ -14,6 +14,8 @@ RUN apt-get update \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
 COPY src ./src
+# Аварии прошивки ptusa — общий с OPC UA-фасадом крейт (лежит в его папке).
+COPY ptusa-opcua/ptusa-alarms ./ptusa-opcua/ptusa-alarms
 COPY migrations ./migrations
 # Кэш реестра crates и target между сборками (BuildKit).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

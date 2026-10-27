@@ -1826,6 +1826,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ptusa-alarms"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mlua",
+ "serde",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2104,6 +2113,7 @@ dependencies = [
  "flate2",
  "mlua",
  "prometheus",
+ "ptusa-alarms",
  "rdkafka",
  "serde",
  "serde_json",

@@ -28,6 +28,7 @@
 | `/` | сам шлюз: библиотека `scada_gateway` (`src/lib.rs`) и бинарник `scada-gateway` (`src/main.rs`) |
 | `simulator/` | PLC-симулятор: OPC UA, Modbus TCP и PAC в одном процессе, проигрывает 5-суточный архив станции; `simulator conformance` и `probe-pac` — служебные подкоманды |
 | `ptusa-opcua/` | фасад «driver-master → OPC UA»: выставляет OPC UA-сервером всё, что отдаёт прошивка ptusa |
+| `ptusa-opcua/ptusa-alarms/` | аварии прошивки ptusa: разбор ответа 103, JSON списка, строка команды 104 — общий крейт шлюза и фасада (лежит в папке фасада, чтобы образ фасада собирался из неё; проверки — `cargo … --workspace` в `ptusa-opcua/`) |
 | `loadtest/loadsim/` | источник нагрузки: десятки OPC UA-серверов с тысячами меняющихся узлов |
 | `tools/station-config/` | генератор конфигурации станции (Java, единственный не-Rust кусок) |
 

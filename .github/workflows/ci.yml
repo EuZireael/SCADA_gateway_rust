@@ -92,10 +92,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ptusa-opcua
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
-      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
+      # --workspace: и общий со шлюзом крейт аварий ptusa-alarms/.
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
       - name: Build image (smoke)
         run: docker build -t ptusa-opcua .
 

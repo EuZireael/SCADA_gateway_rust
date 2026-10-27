@@ -44,6 +44,9 @@ pub struct ServerConfig {
     pub identity: Option<IdentityConfig>,
     /// Путь проекта в мониторе для снимка аварий ПЛК (`path`); не задан — общий префикс имён тегов.
     pub alarms_path: Option<String>,
+    /// `pacAlarms: false` — аварии ПЛК у контроллера не читаются (например, ту же прошивку видит другой контроллер);
+    /// по умолчанию включены у PAC и OPC UA.
+    pub pac_alarms: Option<bool>,
     /// Теги контроллера.
     #[serde(default)]
     pub tags: Vec<TagConfig>,
