@@ -850,7 +850,7 @@ mod tests {
             Controller::from_config(&serde_yaml_ng::from_str::<ServerConfig>(yaml).unwrap()).unwrap()
         }
 
-        /// OPC UA-контроллер с `id` и PAC-контроллер; аварии ПЛК — по `alarms`.
+        /// OPC UA-контроллер с `id`, PAC- и Modbus-контроллер; аварии ПЛК — по `alarms`.
         fn rig(alarms: bool) -> Rig {
             let mut settings = Settings::from_env().expect("настройки по умолчанию");
             settings.gateway.pac_alarms_enabled = alarms;
@@ -868,7 +868,12 @@ mod tests {
                 "name: PAC\nendpoint: pac://h:10000\nenabled: true\ntags:\n\
                  - {name: P.V1.ST, nodeId: V1.ST, dataType: INT32, enabled: true}\n",
             );
-            let queues = Dispatcher::new(["Танки", "PAC"], &metrics);
+            let wago = controller(
+                "name: WAGO\nendpoint: modbus://h:502\nenabled: true\ntags:\n\
+                 - {name: W.R1.V, nodeId: \"modbus:40001\", protocol: modbus, modbusAddress: 40001, dataType: INT32, \
+                 enabled: true}\n",
+            );
+            let queues = Dispatcher::new(["Танки", "PAC", "WAGO"], &metrics);
             let deps = AppDeps {
                 metrics,
                 kafka: Some(kafka.clone()),
@@ -878,7 +883,7 @@ mod tests {
                 leadership,
                 scripts: Scripts::none(),
             };
-            let app = Arc::new(App::new(settings, deps, vec![tanks, pac]));
+            let app = Arc::new(App::new(settings, deps, vec![tanks, pac, wago]));
             Rig { app, kafka, events_rx, queues, dedup: Dedup::new(Duration::from_secs(60), 100) }
         }
 
@@ -910,7 +915,7 @@ mod tests {
             no_number["alarmNumber"] = Value::Null;
             r.submit(no_number);
             r.submit(alarm("c2", "нет-такого"));
-            r.submit(alarm("c3", "PAC"));
+            r.submit(alarm("c3", "WAGO"));
             r.submit(json!({"commandId": "c4", "type": "RESET", "tagName": "BN1.TANKS.TANK1.ST", "value": 1}));
             let got: Vec<(String, String, String)> = r
                 .results()
@@ -924,11 +929,7 @@ mod tests {
             assert_eq!((got[0].0.as_str(), got[0].1.as_str()), ("BN1.TANKS", "REJECTED_INVALID"));
             assert!(got[0].2.contains("alarmNumber"), "{:?}", got[0]);
             assert_eq!((got[1].0.as_str(), got[1].1.as_str()), ("нет-такого", "REJECTED_UNKNOWN_TAG"));
-            assert_eq!(
-                (got[2].0.as_str(), got[2].1.as_str()),
-                ("P.V1", "REJECTED_UNKNOWN_TAG"),
-                "аварии — только у OPC UA"
-            );
+            assert_eq!((got[2].0.as_str(), got[2].1.as_str()), ("W.R1", "REJECTED_UNKNOWN_TAG"), "у Modbus аварий нет");
             assert_eq!((got[3].0.as_str(), got[3].1.as_str()), ("BN1.TANKS.TANK1.ST", "REJECTED_INVALID"));
             assert!(got[3].2.contains("RESET"), "{:?}", got[3]);
             assert_eq!(got.len(), 4);
@@ -936,14 +937,26 @@ mod tests {
                 std::iter::from_fn(|| r.events_rx.try_recv().ok()).map(|e| e.event_type).collect();
             assert_eq!(events, ["PAC_ALARM_COMMAND", "PAC_ALARM_COMMAND", "PAC_ALARM_COMMAND", "COMMAND"]);
 
-            // Правильная команда встаёт в очередь своего контроллера; без сессии OPC UA — нет связи.
-            r.submit(alarm("c5", "ptusa-танки"));
-            assert!(r.results().is_empty(), "ждёт в очереди");
+            // Правильная команда встаёт в очередь своего контроллера (OPC UA и PAC); без соединения — нет связи.
+            for (id, queue, path) in [("ptusa-танки", "Танки", "BN1.TANKS"), ("PAC", "PAC", "P.V1")] {
+                r.submit(alarm(&format!("ok-{queue}"), id));
+                assert!(r.results().is_empty(), "{id}: ждёт в очереди");
+                let (back, done) = run_one(r, queue).await;
+                r = back;
+                assert_eq!(done.len(), 1, "{id}");
+                assert_eq!(done[0].0, path);
+                assert_eq!(done[0].1["status"], "FAILED_NO_CONNECTION", "{id}: {}", done[0].1);
+                assert_eq!(done[0].1["appliedValue"], Value::Null);
+            }
+        }
+
+        /// Исполнить одну команду из очереди контроллера; стенд и результаты.
+        async fn run_one(r: Rig, queue: &'static str) -> (Rig, Vec<(String, Value)>) {
             let cancel = CancellationToken::new();
             let (app, stop) = (r.app.clone(), cancel.clone());
             let worker = async move {
                 r.queues
-                    .run("Танки", &stop, |job| {
+                    .run(queue, &stop, |job| {
                         let app = app.clone();
                         let stop = stop.clone();
                         async move {
@@ -956,11 +969,7 @@ mod tests {
             };
             let r = tokio::time::timeout(Duration::from_secs(5), worker).await.expect("команда исполнена");
             let done = r.results();
-            assert_eq!(done.len(), 1);
-            assert_eq!(done[0].0, "BN1.TANKS");
-            assert_eq!(done[0].1["status"], "FAILED_NO_CONNECTION");
-            assert_eq!(done[0].1["appliedValue"], Value::Null);
-            assert!(cancel.is_cancelled());
+            (r, done)
         }
 
         #[test]

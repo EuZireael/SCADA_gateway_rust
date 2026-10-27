@@ -6,7 +6,7 @@
 //! OPC UA — [`Plc::opcua_write`], PAC — [`Plc::pac_write`], Modbus — через регистры.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -27,8 +27,8 @@ pub struct Plc {
     replay: Option<Replay>,
     /// Запись оператора: цикл не ждёт конца периода, а обновляет узлы сразу.
     pub wake: Notify,
-    /// Аварии прошивки (узел `SYSTEM.ALARMS` OPC UA-сервера).
-    pub alarms: crate::alarms::Alarms,
+    /// Аварии прошивки (узел `SYSTEM.ALARMS` OPC UA-сервера, ответ 103 PAC-сервера).
+    pub alarms: Arc<crate::alarms::Alarms>,
 }
 
 /// Изменяемая часть ПЛК под мьютексом.

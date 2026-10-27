@@ -1,10 +1,13 @@
 //! Аварии ПЛК (ptusa) для монитора: список аварий контроллера → снимок в compact-топик `scada.pac-alarms` (ключ — id
 //! контроллера), команда `PAC_ALARM` → действие над аварией.
 //!
-//! Шлюз ходит к контроллерам ptusa только по OPC UA, поэтому протокол прошивки (103 — список, 104 — действие) берёт на
-//! себя OPC UA-фасад `ptusa-opcua`: список — JSON в узле [`ALARMS_NODE`], действие — метод [`ALARM_CMD_METHOD`]. Шлюз
-//! читает узел раз в `GATEWAY_PAC_ALARMS_INTERVAL_MS` (только активный экземпляр) и публикует снимок, когда меняется
-//! список или связь; у сервера без узла (не фасад) аварий нет. Контракт с монитором — `docs/MONITOR_INTEGRATION.md`.
+//! Источник списка — по протоколу контроллера:
+//! * OPC UA — фасад `ptusa-opcua` берёт протокол прошивки (103 — список, 104 — действие) на себя: список — JSON в узле
+//!   [`ALARMS_NODE`], действие — метод [`ALARM_CMD_METHOD`]; у сервера без узла (не фасад) аварий нет;
+//! * PAC (`pac://`) — шлюз сам шлёт 103 и 104 тем же соединением, что и опрос ([`crate::pac::alarms`]).
+//!
+//! Список читается раз в `GATEWAY_PAC_ALARMS_INTERVAL_MS` (только активный экземпляр), снимок публикуется, когда
+//! меняется список или связь. Контракт с монитором — `docs/MONITOR_INTEGRATION.md`.
 
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -24,6 +27,7 @@ use crate::events::Throttle;
 use crate::messages::{CommandMessage, PacAlarm, PacAlarmsMessage};
 use crate::model::{Controller, ControllerKind};
 use crate::opcua::{self, OpcConnection, ReadValueId, same_status};
+use crate::pac::{self, alarms::AlarmsReader};
 
 /// Узел фасада со списком аварий (JSON).
 pub const ALARMS_NODE: &str = "ns=2;s=SYSTEM.ALARMS";
@@ -60,32 +64,46 @@ pub fn path(c: &Controller) -> Option<String> {
 #[derive(Debug, Deserialize)]
 struct FacadeList {
     id: i64,
-    alarms: Vec<FacadeAlarm>,
+    alarms: Vec<Entry>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Запись списка аварий прошивки — как её отдаёт фасад (JSON) и как её разбирает шлюз из ответа 103 по PAC.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct FacadeAlarm {
-    object_type: Option<i64>,
-    object_number: i64,
-    alarm_number: Option<i64>,
+pub struct Entry {
+    /// Тип объекта (`id_type`); у критических нет.
+    pub object_type: Option<i64>,
+    /// Номер объекта, серийный номер устройства или параметр критической ошибки (`id_n`).
+    pub object_number: i64,
+    /// Номер аварии в объекте (`id_object_alarm_number`); у критических нет.
+    pub alarm_number: Option<i64>,
+    /// Критическая ошибка прошивки (командой не квитируется).
     #[serde(default)]
-    critical: bool,
+    pub critical: bool,
+    /// Текст для оператора.
     #[serde(default)]
-    description: String,
+    pub description: String,
+    /// Группа.
     #[serde(default)]
-    group: String,
-    priority: i64,
-    state: String,
+    pub group: String,
+    /// Приоритет ptusa.
+    pub priority: i64,
+    /// `ALARM`, `RETURN` или `ACCEPT`.
+    pub state: String,
+    /// Подавлена.
     #[serde(default)]
-    suppressed: bool,
+    pub suppressed: bool,
 }
 
-/// JSON узла фасада → счётчик ПЛК и аварии снимка (ключ: `<тип>:<номер>:<авария>`, у критических — `C:<номер>`).
+/// JSON узла фасада → счётчик ПЛК и аварии снимка.
 pub fn parse_facade(json: &str) -> Result<(i64, Vec<PacAlarm>)> {
     let list: FacadeList = serde_json::from_str(json).context("список аварий фасада не разобран")?;
-    let alarms = list
-        .alarms
+    Ok((list.id, snapshot_alarms(list.alarms)))
+}
+
+/// Записи списка → аварии снимка (ключ: `<тип>:<номер>:<авария>`, у критических — `C:<номер>`).
+pub fn snapshot_alarms(entries: Vec<Entry>) -> Vec<PacAlarm> {
+    entries
         .into_iter()
         .map(|a| {
             let (object_type, alarm_number) = if a.critical { (None, None) } else { (a.object_type, a.alarm_number) };
@@ -105,8 +123,7 @@ pub fn parse_facade(json: &str) -> Result<(i64, Vec<PacAlarm>)> {
                 suppressed: a.suppressed,
             }
         })
-        .collect();
-    Ok((list.id, alarms))
+        .collect()
 }
 
 /// Что показало очередное чтение узла.
@@ -120,6 +137,9 @@ pub enum Seen {
     Unsupported,
     /// Фасад ещё не прочитал список у прошивки (сразу после своего запуска): ни снимка, ни журнала.
     Waiting,
+    /// Соединения с контроллером нет (подключается или только что оборвалось — о потере связи сообщает опрос):
+    /// ни снимка, ни журнала.
+    Connecting,
     /// Не прочитано при живой связи (ответ ПЛК не разобран, ошибка чтения): снимок не публикуется.
     Unreadable(String),
 }
@@ -170,7 +190,7 @@ impl Tracker {
                 true
             }
             Seen::Offline if self.expected => false,
-            Seen::Offline | Seen::Unsupported | Seen::Waiting | Seen::Unreadable(_) => return None,
+            Seen::Offline | Seen::Unsupported | Seen::Waiting | Seen::Connecting | Seen::Unreadable(_) => return None,
         };
         let alarms = self.last.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default();
         if self.published.as_ref().is_some_and(|(o, a)| *o == online && *a == alarms) {
@@ -185,14 +205,14 @@ impl Tracker {
     }
 }
 
-/// Прочитать узел аварий в текущей сессии контроллера. `unsupported` — сессия, у сервера которой узла нет (её не читаем;
-/// `Weak` не даёт памяти сессии освободиться, поэтому новая сессия с тем же адресом за неё не сойдёт).
-async fn observe(handle: &ControllerHandle, node: &ReadValueId, unsupported: &mut Weak<OpcConnection>) -> Seen {
+/// Прочитать узел аварий фасада в текущей сессии OPC UA-контроллера. `unsupported` — сессия, у сервера которой узла нет
+/// (её не читаем; `Weak` не даёт памяти сессии освободиться, поэтому новая сессия с тем же адресом за неё не сойдёт).
+async fn observe_opcua(handle: &ControllerHandle, node: &ReadValueId, unsupported: &mut Weak<OpcConnection>) -> Seen {
     if handle.is_down() {
         return Seen::Offline;
     }
     let Some(conn) = handle.opc_connection() else {
-        return Seen::Unreadable("нет сессии OPC UA".into());
+        return Seen::Connecting;
     };
     if std::ptr::eq(unsupported.as_ptr(), Arc::as_ptr(&conn)) {
         return Seen::Unsupported;
@@ -224,13 +244,60 @@ async fn observe(handle: &ControllerHandle, node: &ReadValueId, unsupported: &mu
     }
 }
 
-/// Аварии одного контроллера до остановки: чтение узла, снимок при изменении. Резервный экземпляр не читает.
+/// Прочитать список аварий PAC-контроллера: 103 тем же соединением, что опрос (под его замком, как запись команд),
+/// разбор — уже без соединения. Ответ пришёл, но негоден — соединение остаётся; сбой обмена — соединение закрывается,
+/// опрос переподключится на своём цикле.
+async fn observe_pac(handle: &ControllerHandle, reader: &AlarmsReader) -> Seen {
+    if handle.is_down() {
+        return Seen::Offline;
+    }
+    let mut guard = handle.pac.lock().await;
+    let Some(conn) = guard.as_mut() else {
+        return Seen::Connecting;
+    };
+    let text = match conn.alarms_text().await {
+        Ok(text) => text,
+        Err(e) if pac::connection_intact(&e) => return Seen::Unreadable(format!("{e:#}")),
+        Err(e) => {
+            *guard = None;
+            // Обрыв сокета — потеря связи: о ней сообщит опрос, он же переподключится.
+            if pac::link_lost(&e) {
+                return Seen::Connecting;
+            }
+            return Seen::Unreadable(format!("{e:#} — соединение переоткрывается"));
+        }
+    };
+    drop(guard);
+    match reader.parse(&text) {
+        Ok((version, entries)) => Seen::List(version, snapshot_alarms(entries)),
+        Err(e) => Seen::Unreadable(format!("ответ 103 не разобран: {e:#}")),
+    }
+}
+
+/// Откуда читается список аварий контроллера.
+enum Source {
+    /// Узел фасада; сессия, у сервера которой узла нет.
+    OpcUa(ReadValueId, Weak<OpcConnection>),
+    /// Команда 103 по PAC-соединению; свой Lua-стейт для ответов.
+    Pac(AlarmsReader),
+}
+
+/// Аварии одного контроллера до остановки: чтение списка, снимок при изменении. Резервный экземпляр не читает.
 pub async fn run(app: Arc<App>, handle: Arc<ControllerHandle>, path: String, cancel: CancellationToken) {
     let name = handle.ctrl.name.clone();
     let id = controller_id(&handle.ctrl).to_string();
-    let node = opcua::read_value_id(ALARMS_NODE).expect("адрес узла аварий");
+    let mut source = match handle.ctrl.kind {
+        ControllerKind::Pac => match AlarmsReader::new() {
+            Ok(reader) => Source::Pac(reader),
+            Err(e) => {
+                warn!("{name}: аварии ПЛК не читаются — нет Lua-стейта для ответов: {e:#}");
+                return cancel.cancelled().await;
+            }
+        },
+        _ => Source::OpcUa(opcua::read_value_id(ALARMS_NODE).expect("адрес узла аварий"), Weak::new()),
+    };
     let mut tracker = Tracker::new(handle.ctrl.alarms_path.is_some());
-    let (mut unsupported, mut told_unsupported) = (Weak::new(), false);
+    let mut told_unsupported = false;
     let errors = Throttle::new(ERROR_LOG_EVERY);
     let mut tick = interval(app.settings.gateway.pac_alarms_interval);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -243,13 +310,16 @@ pub async fn run(app: Arc<App>, handle: Arc<ControllerHandle>, path: String, can
             tracker.forget_published();
             continue;
         }
-        let seen = observe(&handle, &node, &mut unsupported).await;
+        let seen = match &mut source {
+            Source::OpcUa(node, unsupported) => observe_opcua(&handle, node, unsupported).await,
+            Source::Pac(reader) => observe_pac(&handle, reader).await,
+        };
         match &seen {
             Seen::Unsupported if !told_unsupported => {
                 told_unsupported = true;
                 info!("{name}: на сервере нет узла {ALARMS_NODE} (это не фасад ptusa-opcua) — аварии ПЛК не читаются");
             }
-            Seen::Unreadable(why) if handle.opc_connection().is_some() && errors.ready() => {
+            Seen::Unreadable(why) if errors.ready() => {
                 warn!("{name}: аварии ПЛК не прочитаны: {why} (повтор — не чаще раза в минуту)");
             }
             _ => {}
@@ -314,6 +384,22 @@ impl AlarmCommand {
     pub fn key(&self) -> String {
         format!("{}:{}:{}", self.object_type, self.object_number, self.alarm_number)
     }
+
+    /// Строка команды 104 прошивке (для PAC-контроллера).
+    pub fn pac_text(&self) -> String {
+        let code = pac::alarms::action_code(self.action).expect("действие проверено при разборе команды");
+        pac::alarms::command_text(code, self.object_type, self.object_number, self.alarm_number)
+    }
+
+    /// Пояснение к `APPLIED`.
+    fn done(&self) -> String {
+        let done = match self.action {
+            "ACCEPT" => "Квитирована",
+            "SUPPRESS" => "Подавлена",
+            _ => "Снято подавление:",
+        };
+        format!("{done} авария {}", self.key())
+    }
 }
 
 /// Проверить команду `PAC_ALARM`; `Err` — пояснение для `REJECTED_INVALID`. В ПЛК уходят только целые: строки из
@@ -344,7 +430,7 @@ pub fn parse_command(cmd: &CommandMessage) -> Result<AlarmCommand, String> {
     })
 }
 
-/// Контроллер команды: включённый, OPC UA, аварии не выключены; `Err` — исход `REJECTED_UNKNOWN_TAG`.
+/// Контроллер команды: включённый, OPC UA или PAC, аварии не выключены; `Err` — исход `REJECTED_UNKNOWN_TAG`.
 pub fn controller(app: &App, id: &str) -> Result<Arc<ControllerHandle>, Outcome> {
     if !app.settings.gateway.pac_alarms_enabled {
         return Err(Outcome::fail("REJECTED_UNKNOWN_TAG", "Аварии ПЛК выключены (GATEWAY_PAC_ALARMS_ENABLED=false)"));
@@ -354,17 +440,53 @@ pub fn controller(app: &App, id: &str) -> Result<Arc<ControllerHandle>, Outcome>
         .iter()
         .find(|h| controller_id(&h.ctrl) == id)
         .ok_or_else(|| Outcome::fail("REJECTED_UNKNOWN_TAG", format!("Контроллер не найден или выключен: {id}")))?;
-    if handle.ctrl.kind != ControllerKind::OpcUa {
+    if !has_alarms(&handle.ctrl) {
         return Err(Outcome::fail(
             "REJECTED_UNKNOWN_TAG",
-            format!("Аварии ПЛК — только у OPC UA-контроллеров (фасад ptusa-opcua): {id}"),
+            format!("Аварии ПЛК — у PAC-контроллеров и у OPC UA-фасада ptusa-opcua, не у Modbus: {id}"),
         ));
     }
     Ok(handle.clone())
 }
 
-/// Исполнить действие: вызов метода фасада. Итог виден по следующему снимку — от себя снимок не публикуется.
+/// У контроллера могут быть аварии ПЛК: PAC или OPC UA (у сервера без узла фасада их просто нет).
+pub fn has_alarms(c: &Controller) -> bool {
+    matches!(c.kind, ControllerKind::OpcUa | ControllerKind::Pac)
+}
+
+/// Исполнить действие: метод фасада (OPC UA) или команда 104 (PAC). Итог виден по следующему снимку — от себя снимок не
+/// публикуется.
 pub async fn execute(handle: &ControllerHandle, cmd: &AlarmCommand) -> Outcome {
+    match handle.ctrl.kind {
+        ControllerKind::Pac => execute_pac(handle, cmd).await,
+        _ => execute_opcua(handle, cmd).await,
+    }
+}
+
+/// Команда 104 тем же соединением, что опрос. Код 0 — выполнено; иначе — ошибка Lua в прошивке.
+async fn execute_pac(handle: &ControllerHandle, cmd: &AlarmCommand) -> Outcome {
+    let mut guard = handle.pac.lock().await;
+    let Some(conn) = guard.as_mut() else {
+        return Outcome::fail("FAILED_NO_CONNECTION", "Нет соединения с ПЛК");
+    };
+    let key = cmd.key();
+    match conn.exec_alarm_command(&cmd.pac_text()).await {
+        Ok(0) => {
+            info!("✍ {}: авария {key} — {}", handle.ctrl.name, cmd.action);
+            Outcome { status: "APPLIED", message: cmd.done(), applied: None }
+        }
+        Ok(code) => Outcome::fail("FAILED_WRITE", format!("ПЛК не выполнил команду над аварией {key} (код {code})")),
+        Err(e) => {
+            if !pac::connection_intact(&e) {
+                *guard = None; // поток рассинхронизирован — опрос переподключится
+            }
+            Outcome::fail("FAILED_WRITE", format!("Команда над аварией не выполнена: {e:#}"))
+        }
+    }
+}
+
+/// Вызов метода фасада `SYSTEM.ALARM_CMD`.
+async fn execute_opcua(handle: &ControllerHandle, cmd: &AlarmCommand) -> Outcome {
     let Some(conn) = handle.opc_connection() else {
         return Outcome::fail("FAILED_NO_CONNECTION", "Контроллер не подключён");
     };
@@ -382,12 +504,7 @@ pub async fn execute(handle: &ControllerHandle, cmd: &AlarmCommand) -> Outcome {
     match conn.call(object, method, args).await {
         Ok(status) if status.is_good() => {
             info!("✍ {}: авария {key} — {}", handle.ctrl.name, cmd.action);
-            let done = match cmd.action {
-                "ACCEPT" => "Квитирована",
-                "SUPPRESS" => "Подавлена",
-                _ => "Снято подавление:",
-            };
-            Outcome { status: "APPLIED", message: format!("{done} авария {key}"), applied: None }
+            Outcome { status: "APPLIED", message: cmd.done(), applied: None }
         }
         Ok(status) if same_status(status, StatusCode::BadInvalidState) => {
             Outcome::fail("FAILED_WRITE", format!("ПЛК не выполнил команду над аварией {key}"))
@@ -540,6 +657,73 @@ mod tests {
         assert_eq!(offline, Snapshot { online: false, pac_version: None, polled_at: None, alarms: vec![] });
         assert_eq!(t.on(Seen::Unsupported, at("t1")), None);
         assert_eq!(t.on(Seen::Waiting, at("t2")), None, "фасад ещё не читал прошивку");
+    }
+
+    /// PAC-контроллер: список (103) и действие (104) — его соединением; негодный ответ соединение не рвёт, молчание —
+    /// рвёт (опрос переподключится), без соединения команда — «нет связи».
+    #[tokio::test]
+    async fn pac_controller_reads_the_list_and_executes_commands_over_its_connection() {
+        use std::sync::Mutex;
+
+        use crate::pac::PacConnection;
+        use crate::pac::alarms::samples;
+        use crate::pac::connection::fake;
+
+        let answer = Arc::new(Mutex::new(samples::OBJECT.to_string()));
+        let (port, commands) = fake::spawn_with_alarms(true, answer.clone()).await;
+        let yaml = format!(
+            "name: P\nendpoint: pac://127.0.0.1:{port}\nenabled: true\n\
+             tags: [{{name: P.V1.ST, nodeId: V1.ST, dataType: INT32, enabled: true}}]\n"
+        );
+        let handle = ControllerHandle::new(
+            Controller::from_config(&serde_yaml_ng::from_str::<ServerConfig>(&yaml).unwrap()).unwrap(),
+        );
+        let conn = PacConnection::connect("127.0.0.1", port, Duration::from_millis(500)).await.unwrap();
+        *handle.pac.lock().await = Some(conn);
+        let reader = AlarmsReader::new().unwrap();
+
+        match observe_pac(&handle, &reader).await {
+            Seen::List(50, alarms) => {
+                assert_eq!(alarms.iter().map(|a| a.key.as_str()).collect::<Vec<_>>(), ["102:2:3"])
+            }
+            other => panic!("ждали список: {other:?}"),
+        }
+        let accept = AlarmCommand {
+            controller_id: "P".into(),
+            action: "ACCEPT",
+            object_type: 102,
+            object_number: 2,
+            alarm_number: 3,
+        };
+        let done = execute(&handle, &accept).await;
+        assert_eq!((done.status, done.message.as_str()), ("APPLIED", "Квитирована авария 102:2:3"));
+        assert_eq!(commands.lock().unwrap().last().unwrap(), "errors_manager:get_instance():set_cmd( 100, 102, 2, 3 )");
+
+        for (bad, why) in [
+            (fake::BAD_ZLIB, "zlib"),
+            ("alarms[0] = { {description=\"x\", priority=1, state=9, id_n=1}, id = 1 }", "не разобран"),
+        ] {
+            *answer.lock().unwrap() = bad.into();
+            match observe_pac(&handle, &reader).await {
+                Seen::Unreadable(e) => assert!(e.contains(why), "{e}"),
+                other => panic!("{bad}: {other:?}"),
+            }
+            assert!(handle.pac.lock().await.is_some(), "{bad}: ответ пришёл целиком — соединение остаётся");
+        }
+        *answer.lock().unwrap() = fake::SILENT.into();
+        assert!(matches!(observe_pac(&handle, &reader).await, Seen::Unreadable(_)));
+        assert!(handle.pac.lock().await.is_none(), "таймаут — соединение закрыто, опрос переподключится");
+        assert_eq!(observe_pac(&handle, &reader).await, Seen::Connecting);
+        *answer.lock().unwrap() = fake::CLOSED.into();
+        *handle.pac.lock().await =
+            Some(PacConnection::connect("127.0.0.1", port, Duration::from_millis(500)).await.unwrap());
+        assert_eq!(
+            observe_pac(&handle, &reader).await,
+            Seen::Connecting,
+            "обрыв — без предупреждения, о нём скажет опрос"
+        );
+        assert!(handle.pac.lock().await.is_none());
+        assert_eq!(execute(&handle, &accept).await.status, "FAILED_NO_CONNECTION");
     }
 
     fn command(body: Value) -> CommandMessage {

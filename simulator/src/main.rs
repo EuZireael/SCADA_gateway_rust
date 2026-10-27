@@ -192,11 +192,14 @@ async fn start_pac(plc: &Arc<Plc>, cfg: &config::Config) -> Result<Option<Arc<Pa
         return Ok(None);
     }
     let writer = plc.clone();
-    let model = Arc::new(PacModel::new(
-        &plc.name,
-        pac_devices(plc),
-        Box::new(move |device, field, index, value| writer.pac_write(device, field, index, value)),
-    ));
+    let model = Arc::new(
+        PacModel::new(
+            &plc.name,
+            pac_devices(plc),
+            Box::new(move |device, field, index, value| writer.pac_write(device, field, index, value)),
+        )
+        .with_alarms(plc.alarms.clone()),
+    );
     let listener = TcpListener::bind(("0.0.0.0", env_port("PAC_PORT", cfg.pac_port)?)).await.context("порт PAC")?;
     tokio::spawn(pac::serve(listener, model.clone()));
     Ok(Some(model))

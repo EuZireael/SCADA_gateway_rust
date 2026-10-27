@@ -144,7 +144,7 @@ pub struct GatewaySettings {
     pub modbus_op_timeout: Duration,
     /// Таймаут одной операции PAC.
     pub pac_op_timeout: Duration,
-    /// Аварии ПЛК (узел `SYSTEM.ALARMS` OPC UA-фасада ptusa): читать и публиковать.
+    /// Аварии ПЛК (103 по PAC, узел `SYSTEM.ALARMS` OPC UA-фасада ptusa): читать и публиковать.
     pub pac_alarms_enabled: bool,
     /// Как часто читать список аварий контроллера.
     pub pac_alarms_interval: Duration,
