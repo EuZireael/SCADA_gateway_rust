@@ -16,7 +16,7 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::{Value, json};
 
 use common::controllers_path;
-use common::gateway::{Gateway, consumer_from_beginning, kafka_config, new_prefix};
+use common::gateway::{Gateway, consumer_from_beginning, kafka_config, new_prefix, recv_until};
 
 /// Записываемый дискретный тег OPC UA (его значение переключаем командами).
 const TAG: &str = "Барановичи-1.BN1_MCA1.M_M.M3.M";
@@ -50,7 +50,7 @@ async fn toggle_and_collect(
     }
     // Дочитать то, что уже лежит в топике телеметрии.
     let mut times = Vec::new();
-    while let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(1500), telemetry.recv()).await {
+    while let Some(m) = recv_until(telemetry, Instant::now() + Duration::from_millis(1500)).await {
         let ts = m.timestamp().to_millis().unwrap_or(0);
         if m.key() == Some(TAG.as_bytes()) && ts >= start {
             times.push(ts);

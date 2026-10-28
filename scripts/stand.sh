@@ -26,7 +26,7 @@ DC=(docker compose -f docker-compose.yml)
 case "${1:-up}" in
   up)
     "${DC[@]}" up -d --build
-    echo "▶ Режим $MODE: шлюз http://localhost:8888/actuator/health · Kafka для монитора localhost:9094"
+    echo "▶ Режим $MODE: шлюз http://localhost:8888/actuator/health · Kafka для монитора 127.0.0.1:9094"
     echo "  симулятор: ${SIM_CONFIG#config/} · станция шлюза: $GATEWAY_STATION"
     ;;
   down) "${DC[@]}" down "${@:2}" ;;

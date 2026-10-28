@@ -15,7 +15,7 @@ use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::{Value, json};
 
-use common::gateway::{Gateway, consumer_from_beginning, kafka_config};
+use common::gateway::{Gateway, consumer_from_beginning, kafka_config, recv_until};
 use common::proxy::{Mode, Proxy};
 use common::{controller, sim_host};
 use scada_gateway::model::{ControllerKind, Protocol};
@@ -66,9 +66,7 @@ fn station(dir: &std::path::Path, endpoint: &str, acquisition: &str) -> std::pat
 async fn wait_value(telemetry: &StreamConsumer, tag: &str, want: &Value, within: Duration) -> Option<Duration> {
     let started = Instant::now();
     let deadline = started + within;
-    while let Ok(Ok(m)) =
-        tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), telemetry.recv()).await
-    {
+    while let Some(m) = recv_until(telemetry, deadline).await {
         if m.key() != Some(tag.as_bytes()) {
             continue;
         }

@@ -15,7 +15,7 @@ use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::{Value, json};
 
-use common::gateway::{Gateway, consumer_from_beginning, kafka_config};
+use common::gateway::{Gateway, consumer_from_beginning, kafka_config, recv_until};
 use common::proxy::{Mode, Proxy};
 
 /// Режим `M` мотора — OPC UA-контроллер симулятора («чистый» актуатор: симулятор его не перетирает).
@@ -47,8 +47,7 @@ async fn collect(
     let mut got = Vec::new();
     let deadline = Instant::now() + within;
     while got.len() < ids.len() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let Ok(Ok(m)) = tokio::time::timeout(left, results.recv()).await else { break };
+        let Some(m) = recv_until(results, deadline).await else { break };
         let r: Value = serde_json::from_slice(m.payload().unwrap_or_default()).unwrap();
         let id = r["commandId"].as_str().unwrap_or_default().to_string();
         if ids.contains(&id) {

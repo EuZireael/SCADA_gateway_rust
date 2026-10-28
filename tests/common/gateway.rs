@@ -12,6 +12,7 @@ use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{Consumer, StreamConsumer};
+use rdkafka::message::BorrowedMessage;
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
 use serde_json::Value;
 
@@ -230,6 +231,20 @@ pub fn kafka_config() -> ClientConfig {
     let mut c = ClientConfig::new();
     c.set("bootstrap.servers", super::kafka_bootstrap());
     c
+}
+
+/// Следующее сообщение консьюмера до срока `deadline`; `None` — срок вышел.
+///
+/// Ошибка приёма — не конец ожидания: librdkafka переподключается сам. Так бывает, когда брокер только что поднялся
+/// или когда `localhost` сначала разрешается в `::1`, а порт проброшен только на IPv4 (#142).
+pub async fn recv_until(consumer: &StreamConsumer, deadline: Instant) -> Option<BorrowedMessage<'_>> {
+    loop {
+        match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), consumer.recv()).await {
+            Ok(Ok(m)) => return Some(m),
+            Ok(Err(_)) => continue,
+            Err(_) => return None,
+        }
+    }
 }
 
 /// Консьюмер всех партиций топика с начала (топик создаёт шлюз при старте — ждём его).

@@ -16,7 +16,7 @@ use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::{Value, json};
 
-use common::gateway::{Gateway, consumer_from_beginning, kafka_config};
+use common::gateway::{Gateway, consumer_from_beginning, kafka_config, recv_until};
 
 /// Имя, которым симулятор называет себя и по PAC (`PAC_name`), и по OPC UA (`SYSTEM.PAC_NAME`): имя ПЛК из его конфигурации.
 const PLC_NAME: &str = "BN1_MCA1 (Барановичи-1) Two-Protocol";
@@ -92,9 +92,7 @@ async fn command(gw: &Gateway, producer: &FutureProducer, results: &StreamConsum
             .await
             .expect("команда не отправлена");
         let deadline = Instant::now() + Duration::from_secs(5);
-        while let Ok(Ok(m)) =
-            tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), results.recv()).await
-        {
+        while let Some(m) = recv_until(results, deadline).await {
             let r: Value = serde_json::from_slice(m.payload().unwrap_or_default()).unwrap();
             if r["commandId"] == id {
                 return r["status"].as_str().unwrap_or_default().to_string();
@@ -107,7 +105,7 @@ async fn command(gw: &Gateway, producer: &FutureProducer, results: &StreamConsum
 /// События типа `CONTROLLER_IDENTITY_MISMATCH` из топика событий.
 async fn mismatch_events(events: &StreamConsumer) -> Vec<Value> {
     let mut found = Vec::new();
-    while let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(1500), events.recv()).await {
+    while let Some(m) = recv_until(events, Instant::now() + Duration::from_millis(1500)).await {
         let e: Value = serde_json::from_slice(m.payload().unwrap_or_default()).unwrap_or_default();
         if e["eventType"] == "CONTROLLER_IDENTITY_MISMATCH" {
             found.push(e);

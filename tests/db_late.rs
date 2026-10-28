@@ -13,7 +13,7 @@ use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::{Value, json};
 
-use common::gateway::{Gateway, consumer_from_beginning, kafka_config};
+use common::gateway::{Gateway, consumer_from_beginning, kafka_config, recv_until};
 use common::proxy::{Mode, Proxy};
 use scada_gateway::config::parse_jdbc_url;
 
@@ -30,9 +30,7 @@ async fn command(gw: &Gateway, producer: &FutureProducer, results: &StreamConsum
             .await
             .expect("команда не отправлена");
         let deadline = Instant::now() + Duration::from_secs(5);
-        while let Ok(Ok(m)) =
-            tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), results.recv()).await
-        {
+        while let Some(m) = recv_until(results, deadline).await {
             let result: Value = serde_json::from_slice(m.payload().unwrap_or_default()).unwrap();
             if result["commandId"] == id {
                 return result["status"].as_str().unwrap_or_default().to_string();
@@ -70,8 +68,8 @@ async fn gateway_starts_without_db_and_prepares_it_when_it_appears() {
     gw.wait_links("UP", Duration::from_secs(40)).await;
     assert!(gw.log().contains("недоступна при запуске"), "{}", gw.log_tail());
     let telemetry = consumer_from_beginning(&gw.topic("tags")).await;
-    let frame = tokio::time::timeout(Duration::from_secs(15), telemetry.recv()).await;
-    assert!(matches!(frame, Ok(Ok(_))), "нет телеметрии без БД\n{}", gw.log_tail());
+    let frame = recv_until(&telemetry, Instant::now() + Duration::from_secs(15)).await;
+    assert!(frame.is_some(), "нет телеметрии без БД\n{}", gw.log_tail());
     let producer: FutureProducer = kafka_config().create().unwrap();
     let results = consumer_from_beginning(&gw.topic("results")).await;
     assert_eq!(command(&gw, &producer, &results, json!(1)).await, "APPLIED", "{}", gw.log_tail());
