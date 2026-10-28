@@ -290,6 +290,8 @@ async fn read_opcua_cycle(
 const FAST_ATTEMPTS: u32 = 300;
 /// Пауза между попытками к контроллеру, который недоступен давно: журнал и сеть не засоряются многодневным простоем.
 const SLOW_PAUSE: Duration = Duration::from_secs(2);
+/// Наибольшая пауза после отказов сервера подряд.
+const REFUSAL_PAUSE_MAX: Duration = Duration::from_secs(30);
 
 /// Пауза перед следующей попыткой подключения к OPC UA после `fails` неудач подряд: `base`
 /// (`GATEWAY_SUPERVISE_INTERVAL_MS`, по умолчанию 0,2 с) первые `FAST_ATTEMPTS` попыток, дальше не короче `SLOW_PAUSE`.
@@ -317,9 +319,19 @@ fn is_link_failure(e: &anyhow::Error) -> bool {
     .any(|marker| text.contains(marker))
 }
 
-/// Пауза после неудачной попытки подключения: короткая при потере связи, не короче `SLOW_PAUSE` при отказе сервера.
-fn pause_after_failure(e: &anyhow::Error, fails: u32, base: Duration) -> Duration {
-    if is_link_failure(e) { reconnect_pause(fails, base) } else { base.max(SLOW_PAUSE) }
+/// Пауза после `refusals`-го отказа сервера подряд: `SLOW_PAUSE`, дальше вдвое дольше с каждым отказом, но не дольше
+/// `REFUSAL_PAUSE_MAX`. Клиент OPC UA при отказе закрывает канал, но не сессию, и сервер держит её до своего таймаута
+/// (до 60 с): с постоянной паузой 2 с неверный пароль занимал все 20 сессий сервера за 40 с, и сервер отказывал
+/// остальным клиентам. С ростом паузы брошенных сессий не больше шести.
+fn refusal_pause(refusals: u32, base: Duration) -> Duration {
+    let doubled = SLOW_PAUSE.saturating_mul(1 << refusals.saturating_sub(1).min(4));
+    base.max(doubled.min(REFUSAL_PAUSE_MAX))
+}
+
+/// Пауза после неудачной попытки подключения: короткая при потере связи, растущая при отказе сервера (`refusals` —
+/// отказов подряд, считая этот).
+fn pause_after_failure(e: &anyhow::Error, fails: u32, refusals: u32, base: Duration) -> Duration {
+    if is_link_failure(e) { reconnect_pause(fails, base) } else { refusal_pause(refusals, base) }
 }
 
 /// Цикл OPC UA: подключение → чтение до обрыва → закрытие и пересоздание сессии; пока подключения нет — кадры BAD на каждой попытке.
@@ -331,6 +343,7 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
     let opts = ConnectOptions::for_controller(&handle.ctrl.opc_security, &gw);
     log_opcua_security(&handle.ctrl.name, &opts);
     let mut fails: u32 = 0;
+    let mut refusals: u32 = 0;
 
     while !cancel.is_cancelled() {
         // Подключение и разбор узлов тегов (адреса, типы, предел запроса) — заново на каждой сессии: программу ПЛК
@@ -364,13 +377,17 @@ async fn run_opcua(app: Arc<App>, handle: Arc<ControllerHandle>, cancel: Cancell
                 } else {
                     on_connect_failed(&app, &handle, &mut processor, &all_tags, fails, &e);
                 }
-                if !pause(&cancel, pause_after_failure(&e, fails, gw.reconnect_interval)).await {
+                if !is_link_failure(&e) {
+                    refusals += 1;
+                }
+                if !pause(&cancel, pause_after_failure(&e, fails, refusals, gw.reconnect_interval)).await {
                     return;
                 }
                 continue;
             }
         };
         fails = 0;
+        refusals = 0;
         handle.touch();
         app.identity_verified(&handle);
         report_nodes(&app, &handle, &report);
@@ -816,10 +833,27 @@ mod tests {
         let too_many =
             anyhow!("OPC UA opc.tcp://x:4840: соединение не установлено (Ok(BadTooManySessions (2153119744)))");
         let hung = anyhow!("OPC UA opc.tcp://x:4840: таймаут 5000 мс (handshake завис)");
-        assert_eq!(pause_after_failure(&refused, 1, base), base);
-        assert_eq!(pause_after_failure(&hung, 1, base), base);
-        assert_eq!(pause_after_failure(&denied, 1, base), SLOW_PAUSE);
-        assert_eq!(pause_after_failure(&too_many, 1, base), SLOW_PAUSE);
+        assert_eq!(pause_after_failure(&refused, 1, 0, base), base);
+        assert_eq!(pause_after_failure(&hung, 1, 3, base), base);
+        assert_eq!(pause_after_failure(&denied, 1, 1, base), SLOW_PAUSE);
+        assert_eq!(pause_after_failure(&too_many, 1, 1, base), SLOW_PAUSE);
+        assert_eq!(pause_after_failure(&denied, 3, 3, base), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn the_pause_after_server_refusals_doubles_up_to_half_a_minute() {
+        let base = Duration::from_millis(200);
+        let pauses: Vec<u64> = (1..=7).map(|n| refusal_pause(n, base).as_secs()).collect();
+        assert_eq!(pauses, [2, 4, 8, 16, 30, 30, 30]);
+        assert_eq!(refusal_pause(u32::MAX, base), REFUSAL_PAUSE_MAX);
+        // Сколько попыток успевает за таймаут сессии на сервере (60 с) — столько сессий могут висеть брошенными.
+        let mut at = Duration::ZERO;
+        let attempts = (1..).take_while(|&n| {
+            let started = at;
+            at += refusal_pause(n, base);
+            started < Duration::from_secs(60)
+        });
+        assert!(attempts.count() <= 6);
     }
 
     #[test]
@@ -827,5 +861,7 @@ mod tests {
         let ten = Duration::from_secs(10);
         assert_eq!(reconnect_pause(1, ten), ten);
         assert_eq!(reconnect_pause(FAST_ATTEMPTS + 1, ten), ten);
+        assert_eq!(refusal_pause(1, ten), ten);
+        assert_eq!(refusal_pause(4, ten), Duration::from_secs(16));
     }
 }
