@@ -82,7 +82,8 @@ kafka_consume() { # <топик> <макс. сообщений> <таймаут 
 log "1. Стенд ($MODE): сборка образов и запуск"
 if [ -n "${GATEWAY_BIN:-}" ]; then
   # Шлюз — процесс на хосте (например, когда образ шлюза собрать негде); остальное — в Docker.
-  "${DC[@]}" up -d ${NO_BUILD:+--no-build} kafka postgres simulator
+  # Образ симулятора пересобирается всегда, кроме NO_BUILD: `up` без --build взял бы старый образ.
+  "${DC[@]}" up -d --${NO_BUILD:+no-}build kafka postgres simulator
   until_ok 120 "Kafka и Postgres готовы" bash -c "[ \"\$(docker inspect -f '{{.State.Health.Status}}' scada-rs-kafka)\" = healthy ] && [ \"\$(docker inspect -f '{{.State.Health.Status}}' scada-rs-postgres)\" = healthy ]"
   GW_LOG=$(mktemp)
   CONTROLLERS_YAML=config/stations/$GATEWAY_STATION PLC_HOST=127.0.0.1 PAC_HOST=127.0.0.1 PAC_PORT=${SIM_PAC_PORT:-10000} SERVER_PORT=8888 \

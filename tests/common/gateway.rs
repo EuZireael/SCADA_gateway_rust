@@ -110,8 +110,12 @@ impl Gateway {
 
     /// Штатная остановка (SIGTERM) и ожидание выхода.
     pub fn terminate(&mut self) {
-        let _ = Command::new("kill").args(["-TERM", &self.child.id().to_string()]).status();
+        self.sigterm();
         let _ = self.child.wait();
+    }
+
+    fn sigterm(&self) {
+        let _ = Command::new("kill").args(["-TERM", &self.child.id().to_string()]).status();
     }
 
     /// Имя тестового топика с префиксом этого запуска.
@@ -194,8 +198,24 @@ impl Gateway {
     }
 }
 
+/// Сколько ждать штатного выхода шлюза при уничтожении `Gateway`, прежде чем убить: остановка задач — до 8 с,
+/// досылка в Kafka — до 3 с, обычно — доли секунды.
+const STOP_GRACE: Duration = Duration::from_secs(10);
+
 impl Drop for Gateway {
+    /// Сначала штатно (SIGTERM): шлюз закроет сессии OPC UA и выйдет из группы Kafka. Убитый сразу (SIGKILL) оставил бы
+    /// сессии на сервере до их таймаута (60 с), и следующие тесты упирались бы в предел сессий симулятора (20).
     fn drop(&mut self) {
+        if let Ok(None) = self.child.try_wait() {
+            self.sigterm();
+            let deadline = Instant::now() + STOP_GRACE;
+            while let Ok(None) = self.child.try_wait() {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
