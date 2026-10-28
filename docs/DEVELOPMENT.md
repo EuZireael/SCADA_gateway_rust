@@ -42,7 +42,7 @@ cargo build --release                       # target/release/scada-gateway
 docker compose up -d postgres kafka simulator
 CONTROLLERS_YAML=config/stations/BN1_MCA1.yaml PLC_HOST=127.0.0.1 \
 SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5433/scada_db \
-SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9094 \
+SPRING_KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9094 \
 ./target/release/scada-gateway
 curl localhost:8888/actuator/health
 ```
@@ -69,11 +69,11 @@ curl localhost:8888/actuator/health
 ### Как запустить интеграционные тесты у себя
 
 ```bash
-docker compose up -d postgres kafka          # Kafka — на localhost:9094
+docker compose up -d postgres kafka          # Kafka — на 127.0.0.1:9094
 (cd simulator && cargo build --release &&
  SIM_OPCUA_USER=operator SIM_OPCUA_PASSWORD=operator-pass OPCUA_ENDPOINT=opc.tcp://127.0.0.1:4840 \
  ./target/release/simulator config/replay_config.yaml &)     # из папки simulator
-SIM_HOST=127.0.0.1 KAFKA_BOOTSTRAP=localhost:9094 \
+SIM_HOST=127.0.0.1 KAFKA_BOOTSTRAP=127.0.0.1:9094 \
 IT_DATABASE_URL=jdbc:postgresql://localhost:5433/scada_it \  # пустая БД: createdb scada_it
 IT_HA_SESSION_MS=6000 \
 cargo test -- --ignored
@@ -86,7 +86,7 @@ IT_DATABASE_TLS_CA=target/pg-tls/ca.crt` (`tests/db_tls.rs`). Симулятор
 | Переменная теста | По умолчанию | Смысл |
 |---|---|---|
 | `SIM_HOST` | `127.0.0.1` | хост симулятора |
-| `KAFKA_BOOTSTRAP` | `localhost:9094` | брокер |
+| `KAFKA_BOOTSTRAP` | `127.0.0.1:9094` | брокер |
 | `SIM_PAC_PORT` | `10000` | порт PAC симулятора в `controllers.yaml`; симулятору — тот же через `PAC_PORT`, если 10000 занят настоящим `ptusa_main` |
 | `CONTROLLERS_YAML` | `config/controllers.yaml` | станция |
 | `IT_DATABASE_URL` | не задан | если задан — шлюз в тесте работает с БД, проверяются журнал и REST |

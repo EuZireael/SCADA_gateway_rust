@@ -23,7 +23,7 @@ use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::{Value, json};
 
-use common::gateway::{Gateway, consumer_from_beginning, kafka_config, new_prefix};
+use common::gateway::{Gateway, consumer_from_beginning, kafka_config, new_prefix, recv_until};
 use common::{controllers, controllers_path};
 
 /// Сессия выборов в тестах (`IT_HA_SESSION_MS`): брокеру CI нужно не меньше 6000.
@@ -66,8 +66,7 @@ async fn tags_since(
     let mut seen = HashSet::new();
     let deadline = Instant::now() + within;
     while seen.len() < expected.len() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let Ok(Ok(m)) = tokio::time::timeout(left, consumer.recv()).await else { break };
+        let Some(m) = recv_until(consumer, deadline).await else { break };
         if m.timestamp().to_millis().unwrap_or(0) >= since_ms {
             let key = String::from_utf8_lossy(m.key().unwrap_or_default()).to_string();
             if expected.contains(&key) {
@@ -93,7 +92,7 @@ async fn command(
         .send(FutureRecord::to(&format!("{prefix}.commands")).key(tag).payload(&body), Duration::from_secs(5))
         .await
         .expect("команда не отправлена");
-    while let Ok(Ok(m)) = tokio::time::timeout(Duration::from_secs(15), results.recv()).await {
+    while let Some(m) = recv_until(results, Instant::now() + Duration::from_secs(15)).await {
         let r: Value = serde_json::from_slice(m.payload().unwrap_or_default()).unwrap();
         if r["commandId"] == id {
             return (r, sent.elapsed());
@@ -313,7 +312,7 @@ async fn two_stations_share_one_kafka_without_interfering() {
     for (gw, own) in [(&a1, &opc_station), (&b1, &pac_station)] {
         let raw = std::fs::read_to_string(own).unwrap();
         let telemetry = consumer_from_beginning(&gw.topic("tags")).await;
-        let m = tokio::time::timeout(Duration::from_secs(15), telemetry.recv()).await.expect("телеметрия").unwrap();
+        let m = recv_until(&telemetry, Instant::now() + Duration::from_secs(15)).await.expect("телеметрия");
         let key = String::from_utf8_lossy(m.key().unwrap_or_default()).to_string();
         assert!(raw.contains(&format!("\"{key}\"")), "{key} не из своей станции");
     }

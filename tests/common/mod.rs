@@ -3,7 +3,7 @@
 //! Окружение (всё с умолчаниями под стенд репозитория `docker compose up -d`):
 //!   SIM_HOST          — хост симулятора (127.0.0.1)
 //!   CONTROLLERS_YAML  — конфиг шлюза (config/controllers.yaml репозитория)
-//!   KAFKA_BOOTSTRAP   — брокер для сквозных тестов (localhost:9094 — внешний listener стенда)
+//!   KAFKA_BOOTSTRAP   — брокер для сквозных тестов (127.0.0.1:9094 — внешний listener стенда)
 //!   IT_DATABASE_URL   — если задан (jdbc:postgresql://…), сквозной тест гоняет шлюз с БД
 #![allow(dead_code)]
 
@@ -25,7 +25,7 @@ pub fn sim_host() -> String {
 
 /// Брокер для тестов (`KAFKA_BOOTSTRAP`).
 pub fn kafka_bootstrap() -> String {
-    std::env::var("KAFKA_BOOTSTRAP").unwrap_or_else(|_| "localhost:9094".into())
+    std::env::var("KAFKA_BOOTSTRAP").unwrap_or_else(|_| "127.0.0.1:9094".into())
 }
 
 /// Файл станции для тестов (`CONTROLLERS_YAML`).

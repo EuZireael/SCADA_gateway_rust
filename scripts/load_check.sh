@@ -59,7 +59,7 @@ log "Kafka"
 until [ "$(docker inspect -f '{{.State.Health.Status}}' scada-rs-kafka 2>/dev/null)" = healthy ]; do sleep 2; done
 
 log "Шлюз"
-CONTROLLERS_YAML="$WORK/load.yaml" DB_ENABLED=false SERVER_PORT=$PORT SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9094 \
+CONTROLLERS_YAML="$WORK/load.yaml" DB_ENABLED=false SERVER_PORT=$PORT SPRING_KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9094 \
   KAFKA_TOPICS_TELEMETRY=load.tags KAFKA_TOPICS_COMMANDS=load.commands KAFKA_TOPICS_COMMAND_RESULTS=load.results \
   KAFKA_TOPICS_EVENTS=load.events KAFKA_TOPICS_ALARMS=load.alarms \
   "$GATEWAY_BIN" > "$WORK/gateway.log" 2>&1 &

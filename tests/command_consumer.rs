@@ -17,7 +17,7 @@ use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::{Value, json};
 
-use common::gateway::{Gateway, consumer_from_beginning, kafka_config, new_prefix};
+use common::gateway::{Gateway, consumer_from_beginning, kafka_config, new_prefix, recv_until};
 
 /// Режим `M` клапана — PAC-контроллер симулятора.
 const TAG: &str = "Барановичи-1.BN1_MCA1.V_M_1.LINE1V0.M";
@@ -39,8 +39,7 @@ async fn statuses(results: &StreamConsumer, ids: &[String], within: Duration) ->
     let mut got = HashMap::new();
     let deadline = Instant::now() + within;
     while got.len() < ids.len() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let Ok(Ok(m)) = tokio::time::timeout(left, results.recv()).await else { break };
+        let Some(m) = recv_until(results, deadline).await else { break };
         let r: Value = serde_json::from_slice(m.payload().unwrap_or_default()).unwrap();
         let id = r["commandId"].as_str().unwrap_or_default().to_string();
         if ids.contains(&id) {
